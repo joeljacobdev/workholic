@@ -47,6 +47,7 @@ final class AppModel {
         self.store = store
         reminderConfig.breakAfterMs = plan.breakAfterMs
         editor.onSave = { [weak self] saved in self?.replacePlan(saved) }
+        overlay.onSkip = { [weak self] in self?.skipActiveBreak() }
         dayEditor.onSave = { [weak self] saved in self?.replaceDayPlan(saved) }
         store.setBootId(bootIdentifier())
         store.closeOpenAtLaunch()
@@ -77,7 +78,7 @@ final class AppModel {
         onChange?()
     }
 
-    var signedIn: Bool { KeychainStore.get(account: "session") != nil }
+    var signedIn: Bool { TokenStore.get("session") != nil }
 
     var usesTasks: Bool { budgetMode == .dynamic }
 
@@ -123,8 +124,8 @@ final class AppModel {
     }
 
     func logout() {
-        KeychainStore.delete(account: "session")
-        KeychainStore.delete(account: "device")
+        TokenStore.delete("session")
+        TokenStore.delete("device")
         defaults.removeObject(forKey: Self.breaksDirtyKey)
         defaults.removeObject(forKey: Self.breaksSyncedAtKey)
         ceilingMs = nil
@@ -301,7 +302,7 @@ final class AppModel {
     }
 
     private func commitLimit(_ limitMs: Int64) async {
-        guard let session = KeychainStore.get(account: "session") else { return }
+        guard let session = TokenStore.get("session") else { return }
         do {
             let api = ApiClient(baseURL: ApiOrigin.baseURL)
             try await api.setLimit(sessionToken: session, limitMs: limitMs)
@@ -314,6 +315,14 @@ final class AppModel {
     }
 
     var breaksEnabled: Bool { plan.enabled }
+
+    func skipActiveBreak() {
+        guard reminder.activeBreak != nil else { return }
+        reminder = skipBreak(state: reminder)
+        endBreak()
+        statusLine = "Break skipped. The next one is \(formatDuration(plan.everyMs)) away."
+        onChange?()
+    }
 
     func toggleBreaks() {
         var next = plan
@@ -481,13 +490,13 @@ final class AppModel {
         do {
             let api = ApiClient(baseURL: ApiOrigin.baseURL)
             let session = try await api.login(username: username, password: password)
-            KeychainStore.set(account: "session", value: session.sessionToken)
+            TokenStore.set("session", session.sessionToken)
             let enrolled = try await api.enroll(
                 sessionToken: session.sessionToken,
                 deviceId: deviceId,
                 displayName: Host.current().localizedName ?? "Mac"
             )
-            KeychainStore.set(account: "device", value: enrolled.deviceToken)
+            TokenStore.set("device", enrolled.deviceToken)
             statusLine = "Signed in as \(session.username)"
             await sync()
         } catch {
@@ -497,7 +506,7 @@ final class AppModel {
     }
 
     private func sync() async {
-        guard let session = KeychainStore.get(account: "session") else { return }
+        guard let session = TokenStore.get("session") else { return }
         let api = ApiClient(baseURL: ApiOrigin.baseURL)
         do {
             let settings = try await api.settings(token: session)
@@ -510,7 +519,7 @@ final class AppModel {
                 if text.contains("bad_token") || text.contains("401") { throw error }
                 breakNote = "Break settings did not sync. \(text)"
             }
-            if let device = KeychainStore.get(account: "device") {
+            if let device = TokenStore.get("device") {
                 try await upload(api: api, deviceToken: device)
             }
             let stats = try await api.stats(token: session)

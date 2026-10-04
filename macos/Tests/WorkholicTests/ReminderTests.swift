@@ -32,6 +32,19 @@ final class ReminderTests: XCTestCase {
         XCTAssertEqual(state.stretchMs, 0)
     }
 
+    func testSkippingEndsThePauseAndRestartsTheInterval() {
+        let opened = ActiveBreak(message: rest.message, remainingMs: 4 * 60_000, durationMs: rest.durationMs, rest: true)
+        var state = skipBreak(state: ReminderState(stretchMs: 50 * 60_000, breakNotified: true, activeBreak: opened))
+        XCTAssertNil(state.activeBreak)
+        XCTAssertEqual(state.stretchMs, 0)
+
+        var notices: [ReminderNotice] = []
+        (state, notices) = reminderStep(state: state, tick: ReminderTick(attendedAddMs: 49 * 60_000, dueBreak: rest), config: config)
+        XCTAssertEqual(notices, [], "the next pause waits a full interval")
+        (state, notices) = reminderStep(state: state, tick: ReminderTick(attendedAddMs: 60_000, dueBreak: rest), config: config)
+        XCTAssertEqual(notices.count, 1)
+    }
+
     func testBreakDoesNotOpenAgainWhileOneIsUp() {
         var state = ReminderState(stretchMs: 50 * 60_000 - 1)
         var notices: [ReminderNotice] = []

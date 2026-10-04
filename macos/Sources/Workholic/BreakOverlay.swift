@@ -1,11 +1,13 @@
 import AppKit
 
-/// One full-screen window on every display. The user's sentence and a countdown are the only contents.
+/// One full-screen window on every display: the user's sentence, a countdown, and a quiet way out.
 @MainActor
-final class BreakOverlay {
+final class BreakOverlay: NSObject {
+    var onSkip: (() -> Void)?
     private var windows: [NSWindow] = []
     private var messages: [NSTextField] = []
     private var countdowns: [NSTextField] = []
+    private var skips: [NSButton] = []
 
     func show(message: String, remainingMs: Int64) {
         layout()
@@ -13,6 +15,13 @@ final class BreakOverlay {
         for window in windows {
             window.orderFrontRegardless()
         }
+        // The overlay covers the menu bar, so it must take keys for Esc to reach the skip button.
+        NSApp.activate(ignoringOtherApps: true)
+        windows.first?.makeKey()
+    }
+
+    @objc private func skip() {
+        onSkip?()
     }
 
     func update(message: String? = nil, remainingMs: Int64) {
@@ -34,8 +43,9 @@ final class BreakOverlay {
         windows = []
         messages = []
         countdowns = []
+        skips = []
         for screen in screens {
-            let window = NSWindow(
+            let window = OverlayWindow(
                 contentRect: screen.frame,
                 styleMask: [.borderless],
                 backing: .buffered,
@@ -54,15 +64,33 @@ final class BreakOverlay {
             let message = label(size: 40, weight: .semibold)
             let countdown = label(size: 96, weight: .medium)
             countdown.font = NSFont.monospacedDigitSystemFont(ofSize: 96, weight: .medium)
+            let skip = skipButton()
             let content = NSView(frame: NSRect(origin: .zero, size: screen.frame.size))
             content.addSubview(message)
             content.addSubview(countdown)
+            content.addSubview(skip)
             window.contentView = content
             place(message: message, countdown: countdown, in: content.bounds.size)
+            skip.frame = NSRect(x: (content.bounds.width - 220) / 2, y: 56, width: 220, height: 32)
             windows.append(window)
             messages.append(message)
             countdowns.append(countdown)
+            skips.append(skip)
         }
+    }
+
+    private func skipButton() -> NSButton {
+        let button = FirstClickButton(title: "", target: self, action: #selector(skip))
+        button.isBordered = false
+        button.attributedTitle = NSAttributedString(
+            string: "Skip this break  (esc)",
+            attributes: [
+                .foregroundColor: NSColor(calibratedWhite: 0.6, alpha: 1),
+                .font: NSFont.systemFont(ofSize: 15, weight: .regular),
+            ]
+        )
+        button.keyEquivalent = "\u{1b}"
+        return button
     }
 
     private func apply(message: String?, remainingMs: Int64) {
@@ -94,6 +122,16 @@ final class BreakOverlay {
         field.cell?.isScrollable = false
         return field
     }
+}
+
+/// Borderless windows refuse key status by default, which would leave Esc with nowhere to go.
+private final class OverlayWindow: NSWindow {
+    override var canBecomeKey: Bool { true }
+}
+
+/// Works on the first click even though the overlay window was not active yet.
+private final class FirstClickButton: NSButton {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
 func formatCountdown(_ ms: Int64) -> String {

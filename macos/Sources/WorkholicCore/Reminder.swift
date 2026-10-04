@@ -229,6 +229,13 @@ public func countdownBreak(
     return (state, .running(remainingMs: remaining))
 }
 
+/// The user dismissed the visible pause. It counts as taken: the next one is a full interval away.
+public func skipBreak(state: ReminderState) -> ReminderState {
+    var state = state
+    finishBreakState(&state)
+    return state
+}
+
 private func recordSession(_ state: inout ReminderState, tick: ReminderTick, notices: inout [ReminderNotice]) {
     if tick.attendedAddMs > 0, var session = state.session {
         session.attendedMs += tick.attendedAddMs
