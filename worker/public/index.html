@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Workholic</title>
+  <meta name="description" content="Your daily attention budget">
+  <meta name="theme-color" content="#312E81">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Workholic">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main id="login-view" class="login" hidden>
+    <div class="login-card">
+      <img src="/icon.svg" alt="" class="login-icon" width="72" height="72">
+      <h1>Workholic</h1>
+      <p class="muted">Your daily attention budget</p>
+      <form id="login-form" novalidate>
+        <label for="username">Username</label>
+        <input id="username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required>
+        <p id="login-error" class="error" role="alert" hidden></p>
+        <button type="submit" id="login-button" class="primary">Log in</button>
+      </form>
+    </div>
+  </main>
+
+  <div id="app-view" hidden>
+    <header class="topbar">
+      <div class="brand">
+        <img src="/icon.svg" alt="" width="28" height="28">
+        <span>Workholic</span>
+      </div>
+      <span id="who" class="muted"></span>
+    </header>
+
+    <nav class="tabs" aria-label="Sections">
+      <a href="#today" data-tab="today">Today</a>
+      <a href="#history" data-tab="history">History</a>
+      <a href="#settings" data-tab="settings">Settings</a>
+    </nav>
+
+    <p id="app-error" class="error banner" role="alert" hidden></p>
+
+    <section id="tab-today" class="tab-panel" hidden>
+      <div class="card gauge-card">
+        <svg class="gauge" viewBox="0 0 120 120" aria-hidden="true">
+          <circle class="gauge-track" cx="60" cy="60" r="50"></circle>
+          <circle id="gauge-arc" class="gauge-arc" cx="60" cy="60" r="50"></circle>
+        </svg>
+        <div class="gauge-center">
+          <div id="today-used" class="big">–</div>
+          <div id="today-of" class="muted"></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="row"><span>Left today</span><strong id="today-left">–</strong></div>
+        <div class="row"><span>Daily limit</span><strong id="today-limit">–</strong></div>
+        <div class="row"><span>Devices reporting</span><strong id="today-devices">–</strong></div>
+      </div>
+      <div class="card">
+        <h2>Top apps today</h2>
+        <ol id="today-apps" class="bars"></ol>
+        <p id="today-apps-empty" class="muted" hidden>No tracked time yet today. Time appears after the Mac app uploads, about every 5 minutes.</p>
+      </div>
+      <p class="muted small">Updated <span id="updated-at">–</span> · <button type="button" id="refresh" class="link">Refresh</button></p>
+    </section>
+
+    <section id="tab-history" class="tab-panel" hidden>
+      <div class="card">
+        <h2>Last 14 days</h2>
+        <ol id="history-list" class="history"></ol>
+      </div>
+    </section>
+
+    <section id="tab-settings" class="tab-panel" hidden>
+      <div class="card">
+        <h2>Daily limit</h2>
+        <form id="limit-form" class="limit-form">
+          <label>Hours <input id="limit-hours" type="number" min="0" max="24" step="1" inputmode="numeric" required></label>
+          <label>Minutes <input id="limit-minutes" type="number" min="0" max="59" step="5" inputmode="numeric" required></label>
+          <button type="submit" class="primary" id="limit-save">Save</button>
+        </form>
+        <p id="limit-status" class="muted small" role="status"></p>
+        <p class="muted small">A new limit applies from today onward. Past days keep the limit they had.</p>
+      </div>
+      <div class="card">
+        <h2>Breaks</h2>
+        <form id="breaks-form">
+          <label class="check"><input type="checkbox" id="breaks-enabled"> Show breaks on my Macs</label>
+          <fieldset id="breaks-detail">
+            <label class="inline">Remind me every
+              <input id="breaks-every" type="number" min="1" max="240" step="1" inputmode="numeric" required>
+              minutes of looking</label>
+            <ol id="breaks-items" class="break-items"></ol>
+            <button type="button" id="breaks-add" class="link">+ Add a pause</button>
+          </fieldset>
+          <button type="submit" class="primary" id="breaks-save">Save breaks</button>
+        </form>
+        <p id="breaks-status" class="muted small" role="status"></p>
+        <p class="muted small">Breaks run in the Mac app. A logged-in Mac picks up changes within 5 minutes.</p>
+      </div>
+      <div class="card">
+        <h2>Account</h2>
+        <div class="row"><span>Username</span><strong id="set-username">–</strong></div>
+        <div class="row"><span>Timezone</span><strong id="set-timezone">–</strong></div>
+        <div class="row"><span>Idle after</span><strong id="set-idle">–</strong></div>
+        <p class="muted small">Timezone and password are changed by the operator CLI.</p>
+      </div>
+      <button type="button" id="logout" class="danger">Log out on this device</button>
+    </section>
+  </div>
+</body>
+</html>

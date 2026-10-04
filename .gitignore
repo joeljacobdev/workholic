@@ -1,0 +1,10 @@
+node_modules/
+.wrangler/
+worker/worker-configuration.d.ts
+.dev.vars
+.env
+dist/
+macos/.build/
+macos/dist/
+.DS_Store
+*.xcuserstate

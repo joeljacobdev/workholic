@@ -1,0 +1,10 @@
+{
+  "private": true,
+  "scripts": {
+    "dev": "npm --prefix worker run dev",
+    "test": "npm --prefix worker test && npm --prefix worker run test:api",
+    "typecheck": "npm --prefix worker run typecheck",
+    "user": "node cli/workholic.mjs",
+    "mac": "macos/scripts/build-app.sh"
+  }
+}

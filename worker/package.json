@@ -1,0 +1,16 @@
+{
+  "name": "workholic-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "typecheck": "wrangler types && tsc --noEmit",
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "test:api": "node test/api.integration.mjs",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "wrangler": "^4.42.0"
+  }
+}
