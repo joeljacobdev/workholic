@@ -18,7 +18,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             return
         }
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.title = "Workholic"
+        statusItem.button?.imagePosition = .imageLeading
+        statusItem.button?.setAccessibilityLabel("Workholic")
+        showStatus(badge: nil, fraction: nil)
         UNUserNotificationCenter.current().delegate = self
         model.onChange = { [weak self] in self?.rebuildMenu() }
         registerAtLogin()
@@ -68,12 +70,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         }
         menu.addItem(item("Quit", #selector(quit)))
         statusItem.menu = menu
-        statusItem.button?.title = model.statusTitle
+        showStatus(badge: model.statusBadge, fraction: model.usageFraction)
     }
 
     func menuWillOpen(_ menu: NSMenu) {
         model.acknowledgeBanner()
-        statusItem.button?.title = "Workholic"
+        showStatus(badge: nil, fraction: model.usageFraction)
+    }
+
+    private func showStatus(badge: String?, fraction: Double?) {
+        guard let button = statusItem.button else { return }
+        button.image = statusIcon(fraction: fraction)
+        button.title = badge.map { " \($0)" } ?? ""
+        if let fraction {
+            button.toolTip = "Workholic · \(Int((fraction * 100).rounded()))% of today's budget"
+        } else {
+            button.toolTip = "Workholic"
+        }
     }
 
     nonisolated func userNotificationCenter(
@@ -113,6 +126,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     @objc private func stopSession() { model.stopSession() }
     @objc private func editBreaks() { model.editBreaks() }
     @objc private func toggleBreaks() { model.toggleBreaks() }
+}
+
+/// The app icon's gauge as a menu bar template image: a faint ring, an arc for
+/// today's share of the budget, and the center dot. Over budget, the ring closes.
+/// With no budget the arc shows the app icon's three-quarter sweep.
+@MainActor
+func statusIcon(fraction: Double?) -> NSImage {
+    let size = NSSize(width: 18, height: 18)
+    let image = NSImage(size: size, flipped: false) { _ in
+        let center = NSPoint(x: 9, y: 9)
+        let radius: CGFloat = 6.5
+        let lineWidth: CGFloat = 2.2
+
+        let track = NSBezierPath()
+        track.appendArc(withCenter: center, radius: radius, startAngle: 0, endAngle: 360)
+        track.lineWidth = lineWidth
+        NSColor.black.withAlphaComponent(0.3).setStroke()
+        track.stroke()
+
+        let sweep = min(max(fraction ?? 0.7, 0), 1)
+        if sweep > 0.005 {
+            let arc = NSBezierPath()
+            // Clockwise from twelve o'clock, like the app icon.
+            arc.appendArc(withCenter: center, radius: radius, startAngle: 90, endAngle: 90 - 360 * sweep, clockwise: true)
+            arc.lineWidth = lineWidth
+            arc.lineCapStyle = sweep >= 1 ? .butt : .round
+            NSColor.black.setStroke()
+            arc.stroke()
+        }
+
+        NSColor.black.setFill()
+        NSBezierPath(ovalIn: NSRect(x: 7.4, y: 7.4, width: 3.2, height: 3.2)).fill()
+        return true
+    }
+    image.isTemplate = true
+    return image
 }
 
 private func registerAtLogin() {

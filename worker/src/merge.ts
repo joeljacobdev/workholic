@@ -19,11 +19,27 @@ export interface AppTotal {
   creditedMs: number;
 }
 
+export interface DeviceAppTotal {
+  deviceId: string;
+  appKey: string;
+  creditedMs: number;
+}
+
+/** A run of credited time that one device and one app held without a break. */
+export interface CreditedSegment {
+  deviceId: string;
+  appKey: string;
+  startMs: number;
+  endMs: number;
+}
+
 export interface DayCredit {
   creditedMs: number;
   unattributedMs: number;
   apps: AppTotal[];
   devices: DeviceTotal[];
+  deviceApps: DeviceAppTotal[];
+  segments: CreditedSegment[];
 }
 
 interface Clipped extends RawInterval {}
@@ -76,6 +92,8 @@ export function creditDay(rows: RawInterval[], dayStart: number, dayEnd: number)
 
   const creditedByDevice = new Map<string, number>();
   const creditedByApp = new Map<string, number>();
+  const creditedByDeviceApp = new Map<string, DeviceAppTotal>();
+  const segments: CreditedSegment[] = [];
   let creditedMs = 0;
   let unattributedMs = 0;
 
@@ -91,6 +109,13 @@ export function creditDay(rows: RawInterval[], dayStart: number, dayEnd: number)
     creditedByDevice.set(chosen.deviceId, (creditedByDevice.get(chosen.deviceId) ?? 0) + duration);
     creditedByApp.set(chosen.appKey, (creditedByApp.get(chosen.appKey) ?? 0) + duration);
     if (chosen.appKey === "unattributed") unattributedMs += duration;
+    const pairKey = `${chosen.deviceId}\u0000${chosen.appKey}`;
+    const pair = creditedByDeviceApp.get(pairKey);
+    if (pair) pair.creditedMs += duration;
+    else creditedByDeviceApp.set(pairKey, { deviceId: chosen.deviceId, appKey: chosen.appKey, creditedMs: duration });
+    const last = segments[segments.length - 1];
+    if (last && last.endMs === startMs && last.deviceId === chosen.deviceId && last.appKey === chosen.appKey) last.endMs = endMs;
+    else segments.push({ deviceId: chosen.deviceId, appKey: chosen.appKey, startMs, endMs });
   }
 
   const deviceIds = new Set<string>(clipped.map((row) => row.deviceId));
@@ -103,5 +128,9 @@ export function creditDay(rows: RawInterval[], dayStart: number, dayEnd: number)
     .map(([appKey, ms]) => ({ appKey, creditedMs: ms }))
     .sort((a, b) => b.creditedMs - a.creditedMs || a.appKey.localeCompare(b.appKey));
 
-  return { creditedMs, unattributedMs, apps, devices };
+  const deviceApps = [...creditedByDeviceApp.values()].sort(
+    (a, b) => a.deviceId.localeCompare(b.deviceId) || b.creditedMs - a.creditedMs || a.appKey.localeCompare(b.appKey),
+  );
+
+  return { creditedMs, unattributedMs, apps, devices, deviceApps, segments };
 }

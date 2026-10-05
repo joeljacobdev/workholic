@@ -71,6 +71,8 @@ export default {
       if (request.method === "POST" && url.pathname === "/v1/devices") return await enroll(request, env);
       if (request.method === "GET" && url.pathname === "/v1/stats") return await stats(request, env, url);
       if (request.method === "GET" && url.pathname === "/v1/settings") return await settings(request, env);
+      const dayPath = /^\/v1\/days\/(\d{4}-\d{2}-\d{2})$/.exec(url.pathname);
+      if (request.method === "GET" && dayPath) return await dayDetail(request, env, dayPath[1]);
       if (request.method === "GET" && url.pathname === "/v1/breaks") return await getBreaks(request, env);
       if (request.method === "PUT" && url.pathname === "/v1/breaks") return await putBreaks(request, env);
       const upload = /^\/v1\/devices\/([0-9a-f-]{36})\/intervals:upload$/.exec(url.pathname);
@@ -258,6 +260,17 @@ async function stats(request: Request, env: Env, url: URL): Promise<Response> {
     from: url.searchParams.get("from"),
     to: url.searchParams.get("to"),
   });
+  if (!result) return json({ error: "bad_token" }, 401);
+  if ("error" in result) return json({ error: result.error }, result.status);
+  return json(result);
+}
+
+async function dayDetail(request: Request, env: Env, day: string): Promise<Response> {
+  const token = bearer(request);
+  if (!token) return json({ error: "bad_token" }, 401);
+  const userId = await userIdForToken(env, token);
+  if (!userId) return json({ error: "bad_token" }, 401);
+  const result = await account(env, userId).dayDetail({ token, now: Date.now(), day });
   if (!result) return json({ error: "bad_token" }, 401);
   if ("error" in result) return json({ error: result.error }, result.status);
   return json(result);

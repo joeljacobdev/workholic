@@ -76,3 +76,26 @@ test("unattributed time still counts toward the ceiling", () => {
   assert.equal(credit.creditedMs, 30);
   assert.equal(credit.unattributedMs, 30);
 });
+
+test("credited time is split per device app and laid out as a timeline", () => {
+  const credit = creditDay(
+    [
+      row({ deviceId: "laptop", appKey: "com.apple.Terminal", startMs: 0, endMs: 100, inputMs: 10 }),
+      row({ deviceId: "laptop", appKey: "com.apple.Terminal", startMs: 100, endMs: 200, inputMs: 150 }),
+      row({ deviceId: "desk", appKey: "com.apple.Safari", startMs: 50, endMs: 120, inputMs: 60 }),
+      row({ deviceId: "desk", appKey: "com.apple.Safari", startMs: 300, endMs: 400, inputMs: 300 }),
+    ],
+    dayStart,
+    dayEnd,
+  );
+  assert.deepEqual(credit.segments, [
+    { deviceId: "laptop", appKey: "com.apple.Terminal", startMs: 0, endMs: 50 },
+    { deviceId: "desk", appKey: "com.apple.Safari", startMs: 50, endMs: 100 },
+    { deviceId: "laptop", appKey: "com.apple.Terminal", startMs: 100, endMs: 200 },
+    { deviceId: "desk", appKey: "com.apple.Safari", startMs: 300, endMs: 400 },
+  ]);
+  assert.deepEqual(credit.deviceApps, [
+    { deviceId: "desk", appKey: "com.apple.Safari", creditedMs: 150 },
+    { deviceId: "laptop", appKey: "com.apple.Terminal", creditedMs: 150 },
+  ]);
+});

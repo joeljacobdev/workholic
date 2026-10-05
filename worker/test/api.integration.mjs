@@ -152,6 +152,15 @@ try {
   assert.equal(stats.status, 200, JSON.stringify(stats.body));
   assert.equal(stats.body.days[0].credited_ms, 120_000);
   assert.equal(stats.body.days[0].ceiling_ms, null);
+  assert.deepEqual(stats.body.device_info.map((info) => [info.device_id, info.display_name]), [[deviceId, "mbp"]]);
+
+  const day = await request("/v1/days/2026-10-04", { token: session });
+  assert.equal(day.status, 200, JSON.stringify(day.body));
+  assert.equal(day.body.credited_ms, 120_000);
+  assert.deepEqual(day.body.segments, [{ device_id: deviceId, app_key: "com.apple.Terminal", start_ms: start, end_ms: start + 120_000 }]);
+  assert.deepEqual(day.body.devices[0].apps, [{ appKey: "com.apple.Terminal", creditedMs: 120_000 }]);
+  assert.equal((await request("/v1/days/2026-10-04")).status, 401);
+  assert.equal((await request("/v1/days/2026-13-45", { token: session })).status, 422);
 
   const limit = await request("/v1/admin/limits", {
     method: "POST",

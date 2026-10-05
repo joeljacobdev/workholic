@@ -86,10 +86,31 @@ final class AppModel {
         budgetForDay(dayPlan, today: civilDay(Date())) != nil
     }
 
-    var statusTitle: String {
+    /// Short text beside the menu bar icon. Nil shows the icon alone.
+    var statusBadge: String? {
         if covering { return "Break" }
         if banners.contains(.sessionBudget) { return "Session" }
-        return "Workholic"
+        return nil
+    }
+
+    /// How much of today's budget is used, for the menu bar gauge. Nil when no budget is set.
+    var usageFraction: Double? {
+        let now = Date()
+        let range = dayRange(now)
+        let local = store.attendedMs(dayStart: range.start, dayEnd: range.end)
+        let used: Int64
+        let ceiling: Int64
+        if budgetMode == .dynamic {
+            guard let todayPlan = budgetForDay(dayPlan, today: civilDay(now)) else { return nil }
+            used = local
+            ceiling = dayBudgetMs(todayPlan.tasks)
+        } else {
+            guard let ceilingMs else { return nil }
+            used = max(syncedCreditedMs ?? 0, local)
+            ceiling = ceilingMs
+        }
+        guard ceiling > 0 else { return used > 0 ? 1 : 0 }
+        return Double(used) / Double(ceiling)
     }
 
     var sessionActive: Bool { reminder.session != nil }

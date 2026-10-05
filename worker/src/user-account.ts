@@ -2,7 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { DEFAULT_BREAKS, type BreakSettings } from "./breaks";
 import { limitCutoff, standingLimit } from "./ceiling";
 import { dayKey, dayWindow, daysTouched } from "./day";
-import { creditDay, type RawInterval } from "./merge";
+import { creditDay, type DayCredit, type RawInterval } from "./merge";
 import { base64url, sha256Hex } from "./password";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -51,9 +51,35 @@ export interface StatsDay {
   devices: Array<{ deviceId: string; rawMs: number; creditedMs: number }>;
 }
 
+/** Every device on the account, oldest first, so the web app can give each a stable color. */
+export interface DeviceInfo {
+  device_id: string;
+  display_name: string;
+  platform: string;
+  created_at_ms: number;
+  last_upload_at_ms: number | null;
+  revoked: boolean;
+}
+
 export type StatsResult =
   | { error: string; status: number }
-  | { timezone: string; username: string; days: StatsDay[] };
+  | { timezone: string; username: string; days: StatsDay[]; device_info: DeviceInfo[] };
+
+export interface DayDetail {
+  day: string;
+  timezone: string;
+  start_ms: number;
+  end_ms: number;
+  credited_ms: number;
+  ceiling_ms: number | null;
+  over: boolean | null;
+  apps: Array<{ appKey: string; creditedMs: number }>;
+  devices: Array<{ deviceId: string; rawMs: number; creditedMs: number; apps: Array<{ appKey: string; creditedMs: number }> }>;
+  segments: Array<{ device_id: string; app_key: string; start_ms: number; end_ms: number }>;
+  device_info: DeviceInfo[];
+}
+
+export type DayDetailResult = { error: string; status: number } | DayDetail;
 
 export interface UploadInput {
   deviceToken: string;
@@ -282,7 +308,48 @@ export class UserAccount extends DurableObject<Env> {
       cursor = dayKey(dayWindow(cursor, user.timezone).endMs + 60_000, user.timezone);
       if (cursor === days[days.length - 1]?.day) break;
     }
-    return { timezone: user.timezone, username: user.username, days };
+    return { timezone: user.timezone, username: user.username, days, device_info: this.deviceInfo() };
+  }
+
+  // One day computed fresh from the raw intervals, with the credited timeline.
+  async dayDetail(input: { token: string; now: number; day: string }): Promise<DayDetailResult | null> {
+    const allowed = (await this.sessionFor(input.token, input.now)) || (await this.deviceFor(input.token));
+    if (!allowed) return null;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(input.day)) return { error: "bad_day", status: 422 };
+    const user = this.requireUser();
+    let window: { startMs: number; endMs: number };
+    try {
+      window = dayWindow(input.day, user.timezone);
+    } catch {
+      return { error: "bad_day", status: 422 };
+    }
+    // Date.UTC rolls 2026-13-45 into a real date; only a day that round-trips is valid.
+    if (dayKey(window.startMs, user.timezone) !== input.day) return { error: "bad_day", status: 422 };
+    const credit = this.creditFor(window);
+    const ceiling = this.ceilingMs(limitCutoff(window.endMs, input.now));
+    return {
+      day: input.day,
+      timezone: user.timezone,
+      start_ms: window.startMs,
+      end_ms: window.endMs,
+      credited_ms: credit.creditedMs,
+      ceiling_ms: ceiling,
+      over: ceiling === null ? null : credit.creditedMs > ceiling,
+      apps: credit.apps,
+      devices: credit.devices.map((device) => ({
+        ...device,
+        apps: credit.deviceApps
+          .filter((pair) => pair.deviceId === device.deviceId)
+          .map((pair) => ({ appKey: pair.appKey, creditedMs: pair.creditedMs })),
+      })),
+      segments: credit.segments.map((segment) => ({
+        device_id: segment.deviceId,
+        app_key: segment.appKey,
+        start_ms: segment.startMs,
+        end_ms: segment.endMs,
+      })),
+      device_info: this.deviceInfo(),
+    };
   }
 
   async settings(input: { token: string; now: number }): Promise<{ timezone: string; idleThresholdMs: number; username: string } | null> {
@@ -499,8 +566,28 @@ export class UserAccount extends DurableObject<Env> {
     );
   }
 
-  private rebuildDay(day: string, timeZone: string, now: number): void {
-    const window = dayWindow(day, timeZone);
+  private deviceInfo(): DeviceInfo[] {
+    return this.ctx.storage.sql
+      .exec<{
+        device_id: string;
+        display_name: string;
+        platform: string;
+        created_at_ms: number;
+        last_upload_at_ms: number | null;
+        revoked_at_ms: number | null;
+      }>("SELECT device_id, display_name, platform, created_at_ms, last_upload_at_ms, revoked_at_ms FROM device ORDER BY created_at_ms, device_id")
+      .toArray()
+      .map((row) => ({
+        device_id: row.device_id,
+        display_name: row.display_name,
+        platform: row.platform,
+        created_at_ms: row.created_at_ms,
+        last_upload_at_ms: row.last_upload_at_ms,
+        revoked: row.revoked_at_ms !== null,
+      }));
+  }
+
+  private creditFor(window: { startMs: number; endMs: number }): DayCredit {
     const rows = this.ctx.storage.sql
       .exec<StoredInterval>(
         "SELECT device_id, start_wall_ms, end_wall_ms, app_key, input_marks_json FROM interval WHERE end_wall_ms > ? AND start_wall_ms < ?",
@@ -518,7 +605,12 @@ export class UserAccount extends DurableObject<Env> {
         inputMs: latestInputMs(marks, row.start_wall_ms),
       };
     });
-    const credit = creditDay(raw, window.startMs, window.endMs);
+    return creditDay(raw, window.startMs, window.endMs);
+  }
+
+  private rebuildDay(day: string, timeZone: string, now: number): void {
+    const window = dayWindow(day, timeZone);
+    const credit = this.creditFor(window);
     const cutoff = limitCutoff(window.endMs, now);
     const ceiling = this.ceilingMs(cutoff);
     const over = ceiling === null ? null : credit.creditedMs > ceiling ? 1 : 0;
