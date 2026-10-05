@@ -66,11 +66,20 @@ struct BreakSettingsPayload: Codable {
     var items: [BreakItemPayload]
     /// Zero until the account has saved break settings once.
     var updatedAtMs: Int64?
+    /// The newer kinds. Nil when talking to an account from before them.
+    var recurringEnabled: Bool? = nil
+    var sessionBreak: SessionBreakRule? = nil
+    var overtime: OvertimeRule? = nil
+    var scheduled: [ScheduledItem]? = nil
     enum CodingKeys: String, CodingKey {
         case enabled
         case everyMinutes = "every_minutes"
         case items
         case updatedAtMs = "updated_at_ms"
+        case recurringEnabled = "recurring_enabled"
+        case sessionBreak = "session_break"
+        case overtime
+        case scheduled
     }
 }
 
