@@ -44,6 +44,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         menu.addItem(item("Open Dashboard…", #selector(openDashboard)))
         menu.addItem(modeItem("Breaks", #selector(toggleBreaks), on: model.breaksEnabled))
         menu.addItem(item("Break settings…", #selector(editBreaks)))
+        if model.isPaused {
+            menu.addItem(item("Unpause", #selector(unpause)))
+        } else {
+            menu.addItem(item("Pause (keep awake, not counted)", #selector(pause)))
+        }
         if model.sessionActive {
             menu.addItem(item("Stop session", #selector(stopSession)))
         } else {
@@ -126,6 +131,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     @objc private func stopSession() { model.stopSession() }
     @objc private func editBreaks() { model.editBreaks() }
     @objc private func toggleBreaks() { model.toggleBreaks() }
+    @objc private func pause() { model.pause() }
+    @objc private func unpause() { model.unpause() }
 }
 
 /// The app icon's gauge as a menu bar template image: a faint ring, an arc for

@@ -30,6 +30,19 @@ final class AppModel {
     private var dayPlanDeferred = false
     private var countdownTimer: Timer?
     private var covering = false
+    /// When the last countdown second ran. A scheduled pause counts down by the wall clock, sleep included.
+    private var lastCountdownAt: Date?
+    /// A scheduled pause put off with "5 more minutes", and when it comes back.
+    private var snoozed: ActiveBreak?
+    private var snoozeUntil: Date?
+    /// Scheduled entries already shown or skipped, by id, with the civil day they were handled on.
+    private var scheduledHandled: [String: String]
+    private let pauseOverlay = PauseOverlay()
+    private let power = PowerAssertion()
+    /// Set while pause mode is on, including a five-minute peek.
+    private var pausedSince: Date?
+    /// Runs during "Unpause for 5 minutes", then brings the pause cover back.
+    private var peekTimer: Timer?
     var onChange: (() -> Void)?
 
     private enum Banner: Hashable {
@@ -42,12 +55,17 @@ final class AppModel {
     private static let breaksDirtyKey = "breakPlanDirty"
     /// The account's `updated_at_ms` for the break settings this Mac last stored or adopted.
     private static let breaksSyncedAtKey = "breakPlanSyncedAt"
+    private static let scheduledHandledKey = "scheduledHandled"
 
     init(store: LocalStore) {
         self.store = store
+        scheduledHandled = UserDefaults.standard.dictionary(forKey: Self.scheduledHandledKey) as? [String: String] ?? [:]
         reminderConfig.breakAfterMs = plan.breakAfterMs
         editor.onSave = { [weak self] saved in self?.replacePlan(saved) }
         overlay.onSkip = { [weak self] in self?.skipActiveBreak() }
+        overlay.onSnooze = { [weak self] in self?.snoozeActiveBreak() }
+        pauseOverlay.onUnpause = { [weak self] in self?.unpause() }
+        pauseOverlay.onPeek = { [weak self] in self?.peek() }
         dayEditor.onSave = { [weak self] saved in self?.replaceDayPlan(saved) }
         store.setBootId(bootIdentifier())
         store.closeOpenAtLaunch()
@@ -73,7 +91,10 @@ final class AppModel {
         timer?.invalidate()
         syncTimer?.invalidate()
         countdownTimer?.invalidate()
+        peekTimer?.invalidate()
         overlay.hide()
+        pauseOverlay.hide()
+        power.release()
         store.seal()
         onChange?()
     }
@@ -88,6 +109,7 @@ final class AppModel {
 
     /// Short text beside the menu bar icon. Nil shows the icon alone.
     var statusBadge: String? {
+        if isPaused { return "Paused" }
         if covering { return "Break" }
         if banners.contains(.sessionBudget) { return "Session" }
         return nil
@@ -162,6 +184,11 @@ final class AppModel {
         let local = store.attendedMs(dayStart: range.start, dayEnd: range.end)
         let unsent = store.unsentMs(dayStart: range.start, dayEnd: range.end)
         var lines: [String] = []
+        if isPaused {
+            lines.append(pauseCovering
+                ? "Paused. Not counted, and this Mac stays awake."
+                : "Unpaused for 5 minutes. The pause comes back.")
+        }
         if let reminderLine { lines.append(reminderLine) }
         if budgetMode == .dynamic {
             lines.append("Budget: tasks for today")
@@ -198,10 +225,21 @@ final class AppModel {
             lines.append("Breaks are off.")
         } else if let active = reminder.activeBreak {
             lines.append(active.paused ? "Pause is waiting until the call ends." : "Pause is on the screen.")
-        } else if let next = plan.upcoming {
+        } else if plan.recurringEnabled, let next = plan.upcoming {
             let left = max(0, plan.everyMs - reminder.stretchMs)
             let when = left < 60_000 ? "less than a minute" : formatDuration(left)
             lines.append("Next pause in \(when): \(next.message)")
+        }
+        if plan.enabled {
+            if let snoozed {
+                lines.append("Back in under 5 minutes: \(snoozed.message)")
+            }
+            if let waiting = reminder.extraDue {
+                lines.append("Waiting to show: \(waiting.message)")
+            }
+            if plan.overtime.enabled, reminder.overtimeMs >= 60_000 {
+                lines.append("Past the limit: \(formatDuration(reminder.overtimeMs)) since the last pause")
+            }
         }
         if reminder.stretchMs >= 60_000 {
             lines.append("At it for \(formatDuration(reminder.stretchMs))")
@@ -338,10 +376,76 @@ final class AppModel {
     var breaksEnabled: Bool { plan.enabled }
 
     func skipActiveBreak() {
-        guard reminder.activeBreak != nil else { return }
+        guard let active = reminder.activeBreak else { return }
         reminder = skipBreak(state: reminder)
         endBreak()
-        statusLine = "Break skipped. The next one is \(formatDuration(plan.everyMs)) away."
+        if active.kind == .recurring {
+            statusLine = "Break skipped. The next one is \(formatDuration(plan.everyMs)) away."
+        } else {
+            statusLine = "Break skipped."
+        }
+        onChange?()
+    }
+
+    /// "5 more minutes" on a scheduled pause. It comes back with the time it had left.
+    func snoozeActiveBreak() {
+        guard reminder.activeBreak?.kind == .scheduled else { return }
+        let (next, held) = snoozeBreak(state: reminder)
+        reminder = next
+        snoozed = held
+        snoozeUntil = Date().addingTimeInterval(5 * 60)
+        endBreak()
+        statusLine = "Break moved 5 minutes later."
+        onChange?()
+    }
+
+    var isPaused: Bool { pausedSince != nil }
+
+    /// The pause cover is up: pause mode is on and this is not a five-minute peek.
+    private var pauseCovering: Bool { pausedSince != nil && peekTimer == nil }
+
+    /// Away while an agent works: the Mac stays awake, the screen is covered, and nothing counts.
+    func pause() {
+        guard pausedSince == nil else { return }
+        pausedSince = Date()
+        power.hold(reason: "Workholic is paused while you are away.")
+        coverForPause()
+    }
+
+    /// Five minutes of normal use. Time counts again until the cover comes back.
+    func peek() {
+        guard pausedSince != nil, peekTimer == nil else { return }
+        pauseOverlay.hide()
+        peekTimer = Timer.scheduledTimer(withTimeInterval: 5 * 60, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.peekTimer = nil
+                self?.coverForPause()
+            }
+        }
+        statusLine = "Unpaused for 5 minutes."
+        onChange?()
+    }
+
+    func unpause() {
+        guard pausedSince != nil else { return }
+        pausedSince = nil
+        peekTimer?.invalidate()
+        peekTimer = nil
+        pauseOverlay.hide()
+        power.release()
+        statusLine = "Unpaused."
+        tick()
+    }
+
+    /// A pause visible when the cover goes up counts as taken: the user is stepping away anyway.
+    private func coverForPause() {
+        guard let since = pausedSince else { return }
+        store.seal()
+        if reminder.activeBreak != nil {
+            reminder = skipBreak(state: reminder)
+            endBreak()
+        }
+        pauseOverlay.show(since: since)
         onChange?()
     }
 
@@ -370,6 +474,17 @@ final class AppModel {
             reminder.breakNotified = false
             reminder.stretchMs = 0
             endBreak()
+        }
+        if let waiting = reminder.extraDue {
+            let kept = waiting.kind == .session ? plan.sessionDue != nil : plan.overtimeDue != nil
+            if !kept { reminder.extraDue = nil }
+        }
+        if plan.overtimeAfterMs == 0 {
+            reminder.overtimeMs = 0
+        }
+        if let held = snoozed, !plan.scheduledEntries.contains(where: { $0.id == held.scheduleId }) {
+            snoozed = nil
+            snoozeUntil = nil
         }
         onChange?()
     }
@@ -400,7 +515,7 @@ final class AppModel {
         store.seal()
         let (next, notices) = reminderStep(
             state: reminder,
-            tick: ReminderTick(slept: true, onCall: onCall, displayAwake: false, dueBreak: plan.due),
+            tick: ReminderTick(slept: true, onCall: onCall || pauseCovering, displayAwake: false, dueBreak: plan.due),
             config: reminderConfig
         )
         reminder = next
@@ -425,7 +540,8 @@ final class AppModel {
                 onConsole: sample.onConsole,
                 displayAwake: sample.displayAwake,
                 idleMs: sample.idleMs,
-                bundleId: sample.bundleId
+                bundleId: sample.bundleId,
+                covered: covering || pauseCovering
             ),
             idleThresholdMs: config.idleThresholdMs
         )
@@ -442,22 +558,68 @@ final class AppModel {
         )
         store.apply(step: step, displayName: sample.displayName, idleMs: sample.idleMs)
         onCall = callInProgress()
+        let now = Date()
+        // The pause cover holds every break the way a call does.
         let (next, notices) = reminderStep(
             state: reminder,
             tick: ReminderTick(
                 attendedAddMs: attendedAddMs(step),
                 gapMs: gap,
                 slept: broke,
-                onCall: onCall,
+                onCall: onCall || pauseCovering,
                 displayAwake: sample.displayAwake,
-                dueBreak: plan.due
+                dueBreak: plan.due,
+                overLimit: overLimit(now: now),
+                overtimeAfterMs: plan.overtimeAfterMs,
+                overtimeBreak: plan.overtimeDue,
+                sessionBreak: plan.sessionDue
             ),
             config: reminderConfig
         )
         reminder = next
         deliver(notices)
+        openScheduled(now: now, displayAwake: sample.displayAwake)
         if dayPlanDeferred { promptDayPlanIfNeeded() }
         onChange?()
+    }
+
+    /// Only asked when overtime pauses are on, since it reads today's total.
+    private func overLimit(now: Date) -> Bool {
+        guard plan.overtimeAfterMs > 0, let ceiling = committedMs(now: now) else { return false }
+        let range = dayRange(now)
+        let local = store.attendedMs(dayStart: range.start, dayEnd: range.end)
+        let used = budgetMode == .dynamic ? local : max(local, syncedCreditedMs ?? 0)
+        return used >= ceiling
+    }
+
+    /// A snoozed pause comes back first. Otherwise a scheduled entry whose window is open now shows
+    /// what is left of it. Neither opens over another pause, on a call, under the pause cover, or on a dark screen.
+    private func openScheduled(now: Date, displayAwake: Bool) {
+        guard reminder.activeBreak == nil, !onCall, !pauseCovering, displayAwake else { return }
+        if let held = snoozed {
+            guard let until = snoozeUntil, now >= until else { return }
+            snoozed = nil
+            snoozeUntil = nil
+            reminder.activeBreak = held
+            deliver([.beginBreak(held)])
+            return
+        }
+        let entries = plan.scheduledEntries
+        guard !entries.isEmpty else { return }
+        let today = civilDay(now)
+        guard let due = dueScheduled(entries, msIntoDay: msIntoDay(now), day: today, handled: scheduledHandled) else { return }
+        scheduledHandled = scheduledHandled.filter { $0.value == today }
+        scheduledHandled[due.entry.id] = today
+        defaults.set(scheduledHandled, forKey: Self.scheduledHandledKey)
+        let (next, notices) = beginScheduledBreak(state: reminder, entry: due.entry, remainingMs: due.remainingMs)
+        reminder = next
+        deliver(notices)
+    }
+
+    private func msIntoDay(_ date: Date) -> Int64 {
+        let parts = Calendar.current.dateComponents([.hour, .minute, .second], from: date)
+        let seconds = (parts.hour ?? 0) * 3_600 + (parts.minute ?? 0) * 60 + (parts.second ?? 0)
+        return Int64(seconds) * 1_000
     }
 
     private func noteDay(_ now: Date) {
@@ -484,7 +646,7 @@ final class AppModel {
             dayPlanDeferred = false
             return
         }
-        if covering || onCall {
+        if covering || onCall || pauseCovering {
             dayPlanDeferred = true
             return
         }
@@ -612,8 +774,10 @@ final class AppModel {
         for notice in notices {
             switch notice {
             case .beginBreak(let active):
-                plan.advance()
-                plan.save()
+                if active.kind == .recurring {
+                    plan.advance()
+                    plan.save()
+                }
                 present(active)
             case .resumeBreak(let active):
                 present(active)
@@ -636,9 +800,12 @@ final class AppModel {
     }
 
     private func present(_ active: ActiveBreak) {
+        // Time behind the cover is not counted, starting now rather than at the next sample.
+        if !covering { store.seal() }
         covering = true
-        overlay.show(message: active.message, remainingMs: active.remainingMs)
+        overlay.show(message: active.message, remainingMs: active.remainingMs, snoozable: active.kind == .scheduled)
         guard countdownTimer == nil else { return }
+        lastCountdownAt = Date()
         countdownTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.countdownTick() }
         }
@@ -649,13 +816,21 @@ final class AppModel {
         covering = false
         countdownTimer?.invalidate()
         countdownTimer = nil
+        lastCountdownAt = nil
     }
 
     private func countdownTick() {
         let awake = CGDisplayIsAsleep(CGMainDisplayID()) == 0
         let call = callInProgress()
         onCall = call
-        let (next, effect) = countdownBreak(state: reminder, elapsedMs: 1_000, displayAwake: awake, onCall: call)
+        let now = Date()
+        var elapsedMs: Int64 = 1_000
+        // A scheduled pause ends on the clock, so lunch is over on time even after the Mac slept.
+        if reminder.activeBreak?.kind == .scheduled, let last = lastCountdownAt {
+            elapsedMs = max(0, Int64(now.timeIntervalSince(last) * 1000))
+        }
+        lastCountdownAt = now
+        let (next, effect) = countdownBreak(state: reminder, elapsedMs: elapsedMs, displayAwake: awake, onCall: call)
         reminder = next
         switch effect {
         case .running(let remaining):
