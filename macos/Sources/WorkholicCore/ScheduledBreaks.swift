@@ -63,12 +63,15 @@ public func beginScheduledBreak(state: ReminderState, entry: ScheduledBreak, rem
     return (state, [.beginBreak(active)])
 }
 
-/// Takes the visible pause down to come back later. Unlike Skip, it does not count as a pause taken.
+/// "5 more minutes": takes an automatic pause down and brings it back with the time it had left.
+/// Unlike Skip, it does not count as a pause taken. A pause the user started cannot be put off.
 public func snoozeBreak(state: ReminderState) -> (ReminderState, ActiveBreak?) {
-    guard let active = state.activeBreak else { return (state, nil) }
+    guard let active = state.activeBreak, active.kind != .manual else { return (state, nil) }
     var state = state
     state.activeBreak = nil
     var held = active
     held.paused = false
+    state.snoozed = held
+    state.snoozeLeftMs = BreakTiming.snoozeMs
     return (state, held)
 }

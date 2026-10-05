@@ -134,6 +134,26 @@ Settings are `scheduled = [{ id, at: "HH:MM", message, minutes }]`, with up to 1
 
 When a cover appears, the open interval is sealed at once. At most one sample period (20 seconds) before the cover is lost; nothing is invented.
 
+### Revision (same day): dynamic session length, a snooze on every automatic break, manual breaks
+
+The user clarified that automatic breaks come in two ways. One is **work time**, where the session length shortens once the day is over its limit. The other is **clock time**. Breaks can also be started by hand.
+
+- **The overtime interval replaces the normal one past the limit.**
+  - When overtime breaks are on and the day is over its limit, the every-few-minutes break is held back: the app passes `breakAfterMs = 0` and no `dueBreak`. The overtime stretch takes over.
+  - With overtime breaks off, behaviour is unchanged.
+  - The menu shows the overtime countdown.
+- **"5 more minutes" on every automatic kind** (every few minutes, session, overtime, scheduled).
+  - Snooze state lives in the core: `ReminderState.snoozed` and `snoozeLeftMs`. Five minutes are counted down by the sample uptime.
+  - The break comes back with the time it had left, but not over another break, during a call or pause mode, or on a dark screen.
+  - A dark screen or the away reset completes a snoozed **rest**, except for a scheduled break.
+  - Taking any other break drops a snoozed break, except for a scheduled break.
+- **Manual breaks.**
+  - "Take a break now" in the menu bar offers 5, 10, 15 or 30 minutes.
+  - `BreakKind.manual` is not a rest and counts down by the wall clock.
+  - It has no "5 more minutes"; Skip (Esc) ends it.
+  - Finishing it counts as a break taken.
+- **The old integration test** that asserted a limit set today on a fixed past day now reads today's date in the account's zone.
+
 ## Sync compatibility
 
 All the new fields are optional on the wire.

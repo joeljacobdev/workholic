@@ -230,7 +230,7 @@ final class BreakEditor: NSObject, NSWindowDelegate {
         every.frame = NSRect(x: 132, y: 220, width: 48, height: 24)
         let minutesLabel = NSTextField(labelWithString: "minutes past the limit")
         minutesLabel.frame = NSRect(x: 186, y: 222, width: 200, height: 22)
-        let note = NSTextField(wrappingLabelWithString: "Nothing happens before the limit. The first pause comes this many minutes after you cross it, and each pause starts the count again.")
+        let note = NSTextField(wrappingLabelWithString: "Past the limit, this replaces the every-few-minutes pause, so sessions get shorter. The first pause comes this many minutes after you cross it. Nothing changes before the limit.")
         note.frame = NSRect(x: 10, y: 166, width: 530, height: 40)
         note.textColor = .secondaryLabelColor
         for subview in [everyLabel, every, minutesLabel, note] {

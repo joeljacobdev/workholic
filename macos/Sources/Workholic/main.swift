@@ -44,6 +44,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         menu.addItem(item("Open Dashboard…", #selector(openDashboard)))
         menu.addItem(modeItem("Breaks", #selector(toggleBreaks), on: model.breaksEnabled))
         menu.addItem(item("Break settings…", #selector(editBreaks)))
+        if model.canTakeBreak {
+            let take = NSMenuItem(title: "Take a break now", action: nil, keyEquivalent: "")
+            let lengths = NSMenu()
+            for minutes in [5, 10, 15, 30] {
+                let length = item("\(minutes) minutes", #selector(takeBreak(_:)))
+                length.tag = minutes
+                lengths.addItem(length)
+            }
+            take.submenu = lengths
+            menu.addItem(take)
+        }
         if model.isPaused {
             menu.addItem(item("Unpause", #selector(unpause)))
         } else {
@@ -132,6 +143,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     @objc private func editBreaks() { model.editBreaks() }
     @objc private func toggleBreaks() { model.toggleBreaks() }
     @objc private func pause() { model.pause() }
+    @objc private func takeBreak(_ sender: NSMenuItem) { model.takeBreak(minutes: sender.tag) }
     @objc private func unpause() { model.unpause() }
 }
 

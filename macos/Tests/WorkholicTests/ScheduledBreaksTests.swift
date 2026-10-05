@@ -64,5 +64,7 @@ final class ScheduledBreaksTests: XCTestCase {
         XCTAssertEqual(snoozed, up)
         XCTAssertEqual(state.stretchMs, 10 * minute)
         XCTAssertEqual(state.overtimeMs, 4 * minute)
+        XCTAssertEqual(state.snoozed, up)
+        XCTAssertEqual(state.snoozeLeftMs, BreakTiming.snoozeMs)
     }
 }

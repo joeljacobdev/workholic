@@ -39,6 +39,13 @@ public enum BreakKind: String, Sendable, Equatable, Codable {
     case overtime
     /// A local clock time, such as lunch.
     case scheduled
+    /// Started from the menu bar. It is the only kind that cannot be put off.
+    case manual
+}
+
+public enum BreakTiming {
+    /// "5 more minutes" on an automatic pause.
+    public static let snoozeMs: Int64 = 5 * 60_000
 }
 
 /// The pause to open when the work interval is reached. The words are the user's.
@@ -101,6 +108,10 @@ public struct ReminderState: Sendable, Equatable {
     /// A session or overtime pause waiting for the call to end, the screen to wake, or the visible pause to finish.
     /// Finishing any pause drops it: a pause was just taken.
     public var extraDue: DueBreak?
+    /// A pause put off with "5 more minutes". It comes back with the time it had left.
+    public var snoozed: ActiveBreak?
+    /// Uptime until the snoozed pause comes back.
+    public var snoozeLeftMs: Int64
 
     public init(
         stretchMs: Int64 = 0,
@@ -111,8 +122,12 @@ public struct ReminderState: Sendable, Equatable {
         heldSession: Bool = false,
         activeBreak: ActiveBreak? = nil,
         overtimeMs: Int64 = 0,
-        extraDue: DueBreak? = nil
+        extraDue: DueBreak? = nil,
+        snoozed: ActiveBreak? = nil,
+        snoozeLeftMs: Int64 = 0
     ) {
+        self.snoozed = snoozed
+        self.snoozeLeftMs = snoozeLeftMs
         self.stretchMs = stretchMs
         self.awayMs = awayMs
         self.breakNotified = breakNotified
@@ -206,6 +221,9 @@ public func reminderStep(state: ReminderState, tick: ReminderTick, config: Remin
     var state = state
     var notices: [ReminderNotice] = []
     recordSession(&state, tick: tick, notices: &notices)
+    if state.snoozed != nil {
+        state.snoozeLeftMs -= max(0, tick.gapMs)
+    }
 
     if state.activeBreak != nil {
         notices.append(contentsOf: trackActiveBreak(&state, tick: tick))
@@ -224,6 +242,9 @@ public func reminderStep(state: ReminderState, tick: ReminderTick, config: Remin
         state.overtimeMs = 0
         if state.extraDue?.rest == true {
             state.extraDue = nil
+        }
+        if let snoozed = state.snoozed, snoozed.rest, snoozed.kind != .scheduled {
+            clearSnooze(&state)
         }
         return (state, notices)
     }
@@ -246,7 +267,16 @@ public func reminderStep(state: ReminderState, tick: ReminderTick, config: Remin
             state.heldBreak = false
             state.overtimeMs = 0
             state.extraDue = nil
+            if state.snoozed?.kind != .scheduled {
+                clearSnooze(&state)
+            }
         }
+    }
+
+    if let snoozed = state.snoozed, state.snoozeLeftMs <= 0, !tick.onCall, state.activeBreak == nil {
+        clearSnooze(&state)
+        state.activeBreak = snoozed
+        notices.append(.resumeBreak(snoozed))
     }
 
     if state.heldBreak && !tick.onCall && state.activeBreak == nil {
@@ -400,4 +430,22 @@ private func finishBreakState(_ state: inout ReminderState) {
     state.breakNotified = false
     state.overtimeMs = 0
     state.extraDue = nil
+    // A pause was just taken, so a snoozed one is no longer owed. Lunch still is.
+    if state.snoozed?.kind != .scheduled {
+        clearSnooze(&state)
+    }
+}
+
+private func clearSnooze(_ state: inout ReminderState) {
+    state.snoozed = nil
+    state.snoozeLeftMs = 0
+}
+
+/// A pause started from the menu bar. It runs on the clock and a dark screen does not end it.
+public func beginManualBreak(state: ReminderState, message: String, durationMs: Int64) -> (ReminderState, [ReminderNotice]) {
+    guard state.activeBreak == nil, durationMs > 0 else { return (state, []) }
+    var state = state
+    let active = ActiveBreak(message: message, remainingMs: durationMs, durationMs: durationMs, rest: false, kind: .manual)
+    state.activeBreak = active
+    return (state, [.beginBreak(active)])
 }
