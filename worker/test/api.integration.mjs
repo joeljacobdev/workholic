@@ -203,6 +203,20 @@ try {
   assert.equal(readBack.body.enabled, false);
   assert.equal(readBack.body.every_minutes, 50);
   assert.equal(readBack.body.items[0].message, "Walk.");
+  assert.equal(readBack.body.overtime.enabled, false, "newer kinds read with defaults");
+  assert.deepEqual(readBack.body.scheduled, []);
+
+  const overtime = { enabled: true, every_minutes: 20, message: "Past the limit.", minutes: 5, rest: true };
+  const lunch = { id: "7f9619ff-8b86-4011-b42d-00c04fc964ff", at: "13:00", message: "Lunch.", minutes: 45 };
+  const newer = await request("/v1/breaks", { method: "PUT", token: session, body: { ...breakBody, overtime, scheduled: [lunch] } });
+  assert.equal(newer.status, 200, JSON.stringify(newer.body));
+  assert.equal((await request("/v1/breaks", { method: "PUT", token: session, body: { ...breakBody, scheduled: [{ ...lunch, at: "24:00" }] } })).body.error, "bad_scheduled");
+  const olderMac = await request("/v1/breaks", { method: "PUT", token: session, body: { ...breakBody, every_minutes: 40 } });
+  assert.equal(olderMac.status, 200, JSON.stringify(olderMac.body));
+  const merged = await request("/v1/breaks", { token: device });
+  assert.equal(merged.body.every_minutes, 40);
+  assert.deepEqual(merged.body.overtime, overtime, "an old-shape save keeps the newer kinds");
+  assert.equal(merged.body.scheduled[0].at, "13:00");
 
   const page = await fetch(`${base}/`);
   assert.equal(page.status, 200);

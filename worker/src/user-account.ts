@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { DEFAULT_BREAKS, type BreakSettings } from "./breaks";
+import { DEFAULT_BREAKS, mergeBreakSettings, withBreakDefaults, type BreakSettings, type BreakSettingsInput } from "./breaks";
 import { limitCutoff, standingLimit } from "./ceiling";
 import { dayKey, dayWindow, daysTouched } from "./day";
 import { creditDay, type DayCredit, type RawInterval } from "./merge";
@@ -367,18 +367,27 @@ export class UserAccount extends DurableObject<Env> {
       .exec<{ settings_json: string; updated_at_ms: number }>("SELECT settings_json, updated_at_ms FROM break_settings WHERE id = 1")
       .toArray()[0];
     if (!row) return { ...DEFAULT_BREAKS, updated_at_ms: 0 };
-    return { ...(JSON.parse(row.settings_json) as BreakSettings), updated_at_ms: row.updated_at_ms };
+    return { ...this.storedBreaks(row.settings_json), updated_at_ms: row.updated_at_ms };
   }
 
-  async setBreaks(input: { sessionToken: string; settings: BreakSettings; now: number }): Promise<(BreakSettings & { updated_at_ms: number }) | null> {
+  async setBreaks(input: { sessionToken: string; settings: BreakSettingsInput; now: number }): Promise<(BreakSettings & { updated_at_ms: number }) | null> {
     const session = await this.sessionFor(input.sessionToken, input.now);
     if (!session) return null;
+    const row = this.ctx.storage.sql
+      .exec<{ settings_json: string }>("SELECT settings_json FROM break_settings WHERE id = 1")
+      .toArray()[0];
+    const stored = row ? this.storedBreaks(row.settings_json) : DEFAULT_BREAKS;
+    const settings = mergeBreakSettings(stored, input.settings);
     this.ctx.storage.sql.exec(
       "INSERT INTO break_settings (id, settings_json, updated_at_ms) VALUES (1, ?, ?) ON CONFLICT (id) DO UPDATE SET settings_json = excluded.settings_json, updated_at_ms = excluded.updated_at_ms",
-      JSON.stringify(input.settings),
+      JSON.stringify(settings),
       input.now,
     );
-    return { ...input.settings, updated_at_ms: input.now };
+    return { ...settings, updated_at_ms: input.now };
+  }
+
+  private storedBreaks(json: string): BreakSettings {
+    return withBreakDefaults(JSON.parse(json) as BreakSettingsInput);
   }
 
   async setOwnLimit(input: { sessionToken: string; limitMs: number; now: number }): Promise<{ error: "bad_token" } | { budgetId: string; limitMs: number; effectiveAtMs: number }> {
