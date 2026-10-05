@@ -29,17 +29,31 @@ public struct BudgetSession: Sendable, Equatable {
     }
 }
 
+/// What brought a pause on. Every kind shares one screen, one countdown, and Skip.
+public enum BreakKind: String, Sendable, Equatable, Codable {
+    /// Every few minutes of looking.
+    case recurring
+    /// A session budget was reached.
+    case session
+    /// Past the daily limit, after each overtime stretch.
+    case overtime
+    /// A local clock time, such as lunch.
+    case scheduled
+}
+
 /// The pause to open when the work interval is reached. The words are the user's.
 public struct DueBreak: Sendable, Equatable {
     public var message: String
     public var durationMs: Int64
     /// A rest is time away from the screen. The screen turning off completes it.
     public var rest: Bool
+    public var kind: BreakKind
 
-    public init(message: String, durationMs: Int64, rest: Bool) {
+    public init(message: String, durationMs: Int64, rest: Bool, kind: BreakKind = .recurring) {
         self.message = message
         self.durationMs = durationMs
         self.rest = rest
+        self.kind = kind
     }
 }
 
@@ -49,13 +63,26 @@ public struct ActiveBreak: Sendable, Equatable {
     public var durationMs: Int64
     public var rest: Bool
     public var paused: Bool
+    public var kind: BreakKind
+    /// The scheduled entry this pause came from. Nil for the other kinds.
+    public var scheduleId: String?
 
-    public init(message: String, remainingMs: Int64, durationMs: Int64, rest: Bool, paused: Bool = false) {
+    public init(
+        message: String,
+        remainingMs: Int64,
+        durationMs: Int64,
+        rest: Bool,
+        paused: Bool = false,
+        kind: BreakKind = .recurring,
+        scheduleId: String? = nil
+    ) {
         self.message = message
         self.remainingMs = remainingMs
         self.durationMs = durationMs
         self.rest = rest
         self.paused = paused
+        self.kind = kind
+        self.scheduleId = scheduleId
     }
 }
 
@@ -69,6 +96,11 @@ public struct ReminderState: Sendable, Equatable {
     /// A session budget was reached during a call. Deliver it once the call ends.
     public var heldSession: Bool
     public var activeBreak: ActiveBreak?
+    /// Attended time past the daily limit since the last pause. It resets wherever `stretchMs` does.
+    public var overtimeMs: Int64
+    /// A session or overtime pause waiting for the call to end, the screen to wake, or the visible pause to finish.
+    /// Finishing any pause drops it: a pause was just taken.
+    public var extraDue: DueBreak?
 
     public init(
         stretchMs: Int64 = 0,
@@ -77,7 +109,9 @@ public struct ReminderState: Sendable, Equatable {
         session: BudgetSession? = nil,
         heldBreak: Bool = false,
         heldSession: Bool = false,
-        activeBreak: ActiveBreak? = nil
+        activeBreak: ActiveBreak? = nil,
+        overtimeMs: Int64 = 0,
+        extraDue: DueBreak? = nil
     ) {
         self.stretchMs = stretchMs
         self.awayMs = awayMs
@@ -86,6 +120,8 @@ public struct ReminderState: Sendable, Equatable {
         self.heldBreak = heldBreak
         self.heldSession = heldSession
         self.activeBreak = activeBreak
+        self.overtimeMs = overtimeMs
+        self.extraDue = extraDue
     }
 }
 
@@ -107,6 +143,13 @@ public struct ReminderTick: Sendable, Equatable {
     public var displayAwake: Bool
     /// The next pause in the user's list. Nil when they have not defined one.
     public var dueBreak: DueBreak?
+    /// Today's looking has reached the daily limit.
+    public var overLimit: Bool
+    /// Overtime stretch before an overtime pause. Zero turns overtime pauses off.
+    public var overtimeAfterMs: Int64
+    public var overtimeBreak: DueBreak?
+    /// The pause to open when a session budget is reached. Nil leaves only the notification.
+    public var sessionBreak: DueBreak?
 
     public init(
         attendedAddMs: Int64 = 0,
@@ -114,7 +157,11 @@ public struct ReminderTick: Sendable, Equatable {
         slept: Bool = false,
         onCall: Bool = false,
         displayAwake: Bool = true,
-        dueBreak: DueBreak? = nil
+        dueBreak: DueBreak? = nil,
+        overLimit: Bool = false,
+        overtimeAfterMs: Int64 = 0,
+        overtimeBreak: DueBreak? = nil,
+        sessionBreak: DueBreak? = nil
     ) {
         self.attendedAddMs = attendedAddMs
         self.gapMs = gapMs
@@ -122,6 +169,10 @@ public struct ReminderTick: Sendable, Equatable {
         self.onCall = onCall
         self.displayAwake = displayAwake
         self.dueBreak = dueBreak
+        self.overLimit = overLimit
+        self.overtimeAfterMs = overtimeAfterMs
+        self.overtimeBreak = overtimeBreak
+        self.sessionBreak = sessionBreak
     }
 }
 
@@ -170,6 +221,10 @@ public func reminderStep(state: ReminderState, tick: ReminderTick, config: Remin
         } else if state.heldBreak {
             state.breakNotified = true
         }
+        state.overtimeMs = 0
+        if state.extraDue?.rest == true {
+            state.extraDue = nil
+        }
         return (state, notices)
     }
 
@@ -181,6 +236,7 @@ public func reminderStep(state: ReminderState, tick: ReminderTick, config: Remin
         if !state.breakNotified && !state.heldBreak && config.breakAfterMs > 0 && state.stretchMs >= config.breakAfterMs {
             notices.append(contentsOf: openBreak(&state, tick: tick))
         }
+        recordOvertime(&state, tick: tick)
     } else if tick.gapMs > 0 {
         state.awayMs += tick.gapMs
         if config.awayResetMs > 0 && state.awayMs >= config.awayResetMs {
@@ -188,6 +244,8 @@ public func reminderStep(state: ReminderState, tick: ReminderTick, config: Remin
             state.awayMs = 0
             state.breakNotified = false
             state.heldBreak = false
+            state.overtimeMs = 0
+            state.extraDue = nil
         }
     }
 
@@ -195,7 +253,25 @@ public func reminderStep(state: ReminderState, tick: ReminderTick, config: Remin
         notices.append(contentsOf: openBreak(&state, tick: tick))
     }
 
+    if let due = state.extraDue, !tick.onCall, state.activeBreak == nil {
+        state.extraDue = nil
+        if due.durationMs > 0 {
+            let active = ActiveBreak(message: due.message, remainingMs: due.durationMs, durationMs: due.durationMs, rest: due.rest, kind: due.kind)
+            state.activeBreak = active
+            notices.append(.beginBreak(active))
+        }
+    }
+
     return (state, notices)
+}
+
+/// Past the limit, looking adds to the overtime stretch until an overtime pause is waiting.
+private func recordOvertime(_ state: inout ReminderState, tick: ReminderTick) {
+    guard tick.overLimit, state.extraDue == nil else { return }
+    state.overtimeMs += tick.attendedAddMs
+    if let due = tick.overtimeBreak, tick.overtimeAfterMs > 0, state.overtimeMs >= tick.overtimeAfterMs {
+        state.extraDue = due
+    }
 }
 
 /// Move a visible pause forward. The caller owns the one-second clock.
@@ -241,6 +317,9 @@ private func recordSession(_ state: inout ReminderState, tick: ReminderTick, not
         session.attendedMs += tick.attendedAddMs
         if !session.notified && session.budgetMs > 0 && session.attendedMs >= session.budgetMs {
             session.notified = true
+            if let due = tick.sessionBreak, state.extraDue == nil {
+                state.extraDue = due
+            }
             if tick.onCall {
                 state.heldSession = true
             } else {
@@ -319,4 +398,6 @@ private func finishBreakState(_ state: inout ReminderState) {
     state.awayMs = 0
     state.heldBreak = false
     state.breakNotified = false
+    state.overtimeMs = 0
+    state.extraDue = nil
 }

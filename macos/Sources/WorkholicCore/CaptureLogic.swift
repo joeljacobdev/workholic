@@ -116,17 +116,20 @@ public struct GateSample: Sendable, Equatable {
     public var displayAwake: Bool
     public var idleMs: Int64
     public var bundleId: String?
+    /// A break or the pause screen is over everything. Time behind it is not attention.
+    public var covered: Bool
 
-    public init(onConsole: Bool, displayAwake: Bool, idleMs: Int64, bundleId: String?) {
+    public init(onConsole: Bool, displayAwake: Bool, idleMs: Int64, bundleId: String?, covered: Bool = false) {
         self.onConsole = onConsole
         self.displayAwake = displayAwake
         self.idleMs = idleMs
         self.bundleId = bundleId
+        self.covered = covered
     }
 }
 
 public func attending(sample: GateSample, idleThresholdMs: Int64) -> Bool {
-    guard sample.onConsole, sample.displayAwake else { return false }
+    guard sample.onConsole, sample.displayAwake, !sample.covered else { return false }
     guard sample.idleMs >= 0, sample.idleMs < idleThresholdMs else { return false }
     if let bundleId = sample.bundleId, deniedBundleIds.contains(bundleId) { return false }
     return true
