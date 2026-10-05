@@ -110,11 +110,42 @@
         <form id="breaks-form">
           <label class="check"><input type="checkbox" id="breaks-enabled"> Show breaks on my Macs</label>
           <fieldset id="breaks-detail">
+            <h3>Every few minutes</h3>
+            <label class="check"><input type="checkbox" id="breaks-recurring"> Show these pauses</label>
             <label class="inline">Remind me every
               <input id="breaks-every" type="number" min="1" max="240" step="1" inputmode="numeric" required>
               minutes of looking</label>
             <ol id="breaks-items" class="break-items"></ol>
             <button type="button" id="breaks-add" class="link">Add a pause</button>
+
+            <h3>After a session</h3>
+            <label class="check"><input type="checkbox" id="session-enabled"> Cover the screen when a session budget is reached</label>
+            <div class="break-rule">
+              <input id="session-message" class="msg" maxlength="200" placeholder="What this pause is for" aria-label="Session pause message">
+              <div class="opts">
+                <label><input id="session-minutes" type="number" min="1" max="180" inputmode="numeric" aria-label="Session pause minutes">min</label>
+                <label><input id="session-rest" type="checkbox">Screen off ends it</label>
+              </div>
+            </div>
+
+            <h3>Past the daily limit</h3>
+            <label class="check"><input type="checkbox" id="overtime-enabled"> Keep pausing once today’s limit is reached</label>
+            <label class="inline">Pause after every
+              <input id="overtime-every" type="number" min="1" max="240" step="1" inputmode="numeric">
+              minutes past the limit</label>
+            <div class="break-rule">
+              <input id="overtime-message" class="msg" maxlength="200" placeholder="What this pause is for" aria-label="Overtime pause message">
+              <div class="opts">
+                <label><input id="overtime-minutes" type="number" min="1" max="180" inputmode="numeric" aria-label="Overtime pause minutes">min</label>
+                <label><input id="overtime-rest" type="checkbox">Screen off ends it</label>
+              </div>
+            </div>
+            <p class="muted small">Nothing happens before the limit. The first pause comes that many minutes after you cross it.</p>
+
+            <h3>At set times</h3>
+            <ol id="scheduled-items" class="break-items"></ol>
+            <button type="button" id="scheduled-add" class="link">Add a time</button>
+            <p class="muted small">Covers the screen from that time for its length, once a day, in each Mac’s local time. “5 more minutes” puts it off.</p>
           </fieldset>
           <button type="submit" class="primary" id="breaks-save">Save breaks</button>
         </form>

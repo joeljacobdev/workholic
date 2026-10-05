@@ -675,6 +675,9 @@ const BREAK_ERRORS = {
   bad_items: "Keep between 1 and 20 pauses.",
   bad_item_message: "Every pause needs a short message (up to 200 characters).",
   bad_item_minutes: "Each pause lasts 1 to 180 minutes.",
+  bad_session_break: "The session pause needs a message and 1 to 180 minutes.",
+  bad_overtime: "The past-the-limit pause needs a message, 1 to 180 minutes, and a gap of 1 to 240 minutes.",
+  bad_scheduled: "Each set time needs a time, a message, and 1 to 180 minutes (up to 10 times).",
 };
 let breaksDirty = false;
 
@@ -718,12 +721,75 @@ function syncRemoveButtons() {
   $("breaks-add").disabled = rows.length >= 20;
 }
 
+function scheduledRow(entry) {
+  const row = el("li");
+  row.dataset.id = entry.id;
+  const message = el("input", "msg");
+  message.value = entry.message;
+  message.placeholder = "What this pause is for";
+  message.maxLength = 200;
+  message.setAttribute("aria-label", "Set-time pause message");
+  const when = el("div", "when");
+  const atLabel = el("label");
+  const at = el("input", "at");
+  at.type = "time";
+  at.required = true;
+  at.value = entry.at;
+  atLabel.append(document.createTextNode("At"), at);
+  const minutesLabel = el("label");
+  const minutes = el("input", "minutes");
+  minutes.type = "number";
+  minutes.min = "1";
+  minutes.max = "180";
+  minutes.inputMode = "numeric";
+  minutes.value = String(entry.minutes);
+  minutesLabel.append(minutes, document.createTextNode("min"));
+  when.append(atLabel, minutesLabel);
+  const remove = el("button", "link remove", "Remove");
+  remove.type = "button";
+  remove.addEventListener("click", () => {
+    row.remove();
+    breaksDirty = true;
+    syncScheduledAdd();
+  });
+  row.append(message, when, remove);
+  return row;
+}
+
+function syncScheduledAdd() {
+  $("scheduled-add").disabled = $("scheduled-items").children.length >= 10;
+}
+
+function renderRule(prefix, rule) {
+  $(`${prefix}-enabled`).checked = rule.enabled;
+  $(`${prefix}-message`).value = rule.message;
+  $(`${prefix}-minutes`).value = String(rule.minutes);
+  $(`${prefix}-rest`).checked = rule.rest;
+}
+
+function readRule(prefix) {
+  return {
+    enabled: $(`${prefix}-enabled`).checked,
+    message: $(`${prefix}-message`).value.trim(),
+    minutes: Number($(`${prefix}-minutes`).value),
+    rest: $(`${prefix}-rest`).checked,
+  };
+}
+
 function renderBreaks(settings) {
   $("breaks-enabled").checked = settings.enabled;
   $("breaks-detail").disabled = !settings.enabled;
+  $("breaks-recurring").checked = settings.recurring_enabled !== false;
   $("breaks-every").value = String(settings.every_minutes);
   $("breaks-items").replaceChildren(...settings.items.map(breakRow));
   syncRemoveButtons();
+  if (settings.session_break) renderRule("session", settings.session_break);
+  if (settings.overtime) {
+    renderRule("overtime", settings.overtime);
+    $("overtime-every").value = String(settings.overtime.every_minutes);
+  }
+  $("scheduled-items").replaceChildren(...(settings.scheduled ?? []).map(scheduledRow));
+  syncScheduledAdd();
   breaksDirty = false;
 }
 
@@ -745,7 +811,21 @@ async function saveBreaks(event) {
     minutes: Number(row.querySelector(".minutes").value),
     rest: row.querySelector(".rest").checked,
   }));
-  const body = { enabled: $("breaks-enabled").checked, every_minutes: Number($("breaks-every").value), items };
+  const scheduled = [...$("scheduled-items").children].map((row) => ({
+    id: row.dataset.id,
+    at: row.querySelector(".at").value,
+    message: row.querySelector(".msg").value.trim(),
+    minutes: Number(row.querySelector(".minutes").value),
+  }));
+  const body = {
+    enabled: $("breaks-enabled").checked,
+    every_minutes: Number($("breaks-every").value),
+    items,
+    recurring_enabled: $("breaks-recurring").checked,
+    session_break: readRule("session"),
+    overtime: { ...readRule("overtime"), every_minutes: Number($("overtime-every").value) },
+    scheduled,
+  };
   $("breaks-save").disabled = true;
   try {
     renderBreaks(await api("/v1/breaks", { method: "PUT", body }));
@@ -876,6 +956,12 @@ $("breaks-add").addEventListener("click", () => {
   breaksDirty = true;
   syncRemoveButtons();
   $("breaks-items").lastElementChild.querySelector(".msg").focus();
+});
+$("scheduled-add").addEventListener("click", () => {
+  $("scheduled-items").append(scheduledRow({ id: crypto.randomUUID(), at: "13:00", message: "Lunch. Away from the screen.", minutes: 45 }));
+  breaksDirty = true;
+  syncScheduledAdd();
+  $("scheduled-items").lastElementChild.querySelector(".msg").focus();
 });
 $("logout").addEventListener("click", logout);
 $("refresh").addEventListener("click", refresh);

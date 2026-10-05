@@ -261,6 +261,14 @@ label.inline input { width: 72px; }
 .break-items .opts input[type="number"] { width: 64px; padding: 6px 8px; }
 .break-items .opts label { display: flex; align-items: center; gap: 6px; margin: 0; }
 .break-items .remove { color: var(--over); }
+#breaks-detail h3 { margin: 22px 0 10px; padding-top: 16px; border-top: 1px solid var(--line); }
+#breaks-detail h3:first-child { margin-top: 4px; padding-top: 0; border-top: 0; }
+.break-rule { display: grid; gap: 8px; margin: 0 0 12px; }
+.break-rule .opts, .break-items .when { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; font-size: 14px; color: var(--muted); }
+.break-rule .opts input[type="number"], .break-items .when input[type="number"] { width: 64px; padding: 6px 8px; }
+.break-rule .opts input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--brand); }
+.break-rule .opts label, .break-items .when label { display: flex; align-items: center; gap: 6px; margin: 0; }
+.break-items .when input[type="time"] { width: auto; padding: 6px 8px; }
 #breaks-save { width: 100%; margin-top: 14px; }
 
 /* Tooltip */
