@@ -168,7 +168,9 @@ try {
     body: { username: "tester", limit_ms: 8 * 60 * 60 * 1000 },
   });
   assert.equal(limit.status, 200);
-  const withCeiling = await request("/v1/stats?from=2026-10-04&to=2026-10-04", { token: session });
+  // A limit applies from now on, so read it on today's date in the account's zone, not on the fixture day.
+  const today = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Los_Angeles" }).format(new Date());
+  const withCeiling = await request(`/v1/stats?from=${today}&to=${today}`, { token: session });
   assert.equal(withCeiling.body.days[0].ceiling_ms, 8 * 60 * 60 * 1000);
   assert.equal(withCeiling.body.days[0].over, false);
 
