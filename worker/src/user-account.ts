@@ -352,11 +352,28 @@ export class UserAccount extends DurableObject<Env> {
     };
   }
 
-  async settings(input: { token: string; now: number }): Promise<{ timezone: string; idleThresholdMs: number; username: string } | null> {
+  // Cheap enough for a Mac to ask every few seconds: it says when breaks last changed
+  // and what limit governs right now, so the Mac fetches breaks only when they moved.
+  async settings(input: { token: string; now: number }): Promise<{
+    timezone: string;
+    idleThresholdMs: number;
+    username: string;
+    limitMs: number | null;
+    breaksUpdatedAtMs: number;
+  } | null> {
     const allowed = (await this.sessionFor(input.token, input.now)) || (await this.deviceFor(input.token));
     if (!allowed) return null;
     const user = this.requireUser();
-    return { timezone: user.timezone, idleThresholdMs: user.idle_threshold_ms, username: user.username };
+    const breaks = this.ctx.storage.sql
+      .exec<{ updated_at_ms: number }>("SELECT updated_at_ms FROM break_settings WHERE id = 1")
+      .toArray()[0];
+    return {
+      timezone: user.timezone,
+      idleThresholdMs: user.idle_threshold_ms,
+      username: user.username,
+      limitMs: this.ceilingMs(input.now),
+      breaksUpdatedAtMs: breaks?.updated_at_ms ?? 0,
+    };
   }
 
   // updated_at_ms is 0 until someone saves, so a Mac knows to upload its own copy.

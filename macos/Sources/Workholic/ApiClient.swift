@@ -23,10 +23,16 @@ struct SettingsResponse: Decodable {
     var username: String
     var timezone: String
     var idleThresholdMs: Int64
+    /// The limit in force now. Nil when none is set, or from a server before this field.
+    var limitMs: Int64?
+    /// When the account's break settings last changed. Nil from a server before this field.
+    var breaksUpdatedAtMs: Int64?
     enum CodingKeys: String, CodingKey {
         case username
         case timezone
         case idleThresholdMs = "idle_threshold_ms"
+        case limitMs = "limit_ms"
+        case breaksUpdatedAtMs = "breaks_updated_at_ms"
     }
 }
 
@@ -48,11 +54,6 @@ struct StatsDay: Decodable {
     }
 }
 
-struct LimitResponse: Decodable {
-    var limitMs: Int64
-    enum CodingKeys: String, CodingKey { case limitMs = "limit_ms" }
-}
-
 struct BreakItemPayload: Codable {
     var id: String
     var message: String
@@ -68,7 +69,6 @@ struct BreakSettingsPayload: Codable {
     var updatedAtMs: Int64?
     /// The newer kinds. Nil when talking to an account from before them.
     var recurringEnabled: Bool? = nil
-    var sessionBreak: SessionBreakRule? = nil
     var overtime: OvertimeRule? = nil
     var scheduled: [ScheduledItem]? = nil
     enum CodingKeys: String, CodingKey {
@@ -77,7 +77,6 @@ struct BreakSettingsPayload: Codable {
         case items
         case updatedAtMs = "updated_at_ms"
         case recurringEnabled = "recurring_enabled"
-        case sessionBreak = "session_break"
         case overtime
         case scheduled
     }
@@ -126,15 +125,6 @@ struct ApiClient {
 
     func stats(token: String) async throws -> StatsResponse {
         try await send(path: "/v1/stats", method: "GET", token: token, body: nil)
-    }
-
-    func setLimit(sessionToken: String, limitMs: Int64) async throws {
-        var request = URLRequest(url: baseURL.appending(path: "/v1/limits"))
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(sessionToken)", forHTTPHeaderField: "Authorization")
-        request.httpBody = try JSONSerialization.data(withJSONObject: ["limit_ms": limitMs])
-        let _: LimitResponse = try await decode(request)
     }
 
     func breaks(token: String) async throws -> BreakSettingsPayload {

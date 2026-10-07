@@ -11,7 +11,7 @@ final class SnoozeAndManualTests: XCTestCase {
     }
 
     func testEveryAutomaticKindCanBeSnoozed() {
-        for kind in [BreakKind.recurring, .session, .overtime, .scheduled] {
+        for kind in [BreakKind.recurring, .overtime, .scheduled] {
             let (state, held) = snoozeBreak(state: ReminderState(activeBreak: up(kind)))
             XCTAssertNil(state.activeBreak, "\(kind)")
             XCTAssertEqual(held, up(kind))

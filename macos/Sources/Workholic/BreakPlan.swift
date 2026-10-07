@@ -9,16 +9,6 @@ struct BreakItem: Codable, Equatable, Identifiable, Sendable {
     var rest: Bool
 }
 
-/// A pause that covers the screen once a session budget is reached.
-struct SessionBreakRule: Codable, Equatable, Sendable {
-    var enabled: Bool
-    var message: String
-    var minutes: Int
-    var rest: Bool
-
-    static let standard = SessionBreakRule(enabled: false, message: "Session done. Step away from the screen.", minutes: 5, rest: true)
-}
-
 /// Past the daily limit, a pause after every `everyMinutes` of further looking.
 struct OvertimeRule: Codable, Equatable, Sendable {
     var enabled: Bool
@@ -55,7 +45,6 @@ struct BreakPlan: Codable, Equatable {
     var cursor: Int
     /// The every-few-minutes pause, separately from the other kinds.
     var recurringEnabled: Bool
-    var session: SessionBreakRule
     var overtime: OvertimeRule
     var scheduled: [ScheduledItem]
 
@@ -65,7 +54,6 @@ struct BreakPlan: Codable, Equatable {
         items: [BreakItem],
         cursor: Int,
         recurringEnabled: Bool = true,
-        session: SessionBreakRule = .standard,
         overtime: OvertimeRule = .standard,
         scheduled: [ScheduledItem] = []
     ) {
@@ -74,13 +62,12 @@ struct BreakPlan: Codable, Equatable {
         self.items = items
         self.cursor = cursor
         self.recurringEnabled = recurringEnabled
-        self.session = session
         self.overtime = overtime
         self.scheduled = scheduled
     }
 
     // Plans saved before the on/off switch existed have no `enabled` key,
-    // and plans saved before the newer kinds have none of theirs.
+    // and plans saved before the newer kinds have none of theirs. A stored `session` key is ignored.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
@@ -88,7 +75,6 @@ struct BreakPlan: Codable, Equatable {
         items = try container.decode([BreakItem].self, forKey: .items)
         cursor = try container.decode(Int.self, forKey: .cursor)
         recurringEnabled = try container.decodeIfPresent(Bool.self, forKey: .recurringEnabled) ?? true
-        session = try container.decodeIfPresent(SessionBreakRule.self, forKey: .session) ?? .standard
         overtime = try container.decodeIfPresent(OvertimeRule.self, forKey: .overtime) ?? .standard
         scheduled = try container.decodeIfPresent([ScheduledItem].self, forKey: .scheduled) ?? []
     }
@@ -107,11 +93,6 @@ struct BreakPlan: Codable, Equatable {
     var due: DueBreak? {
         guard enabled, recurringEnabled, let item = upcoming else { return nil }
         return DueBreak(message: item.message, durationMs: Int64(max(1, item.minutes)) * 60_000, rest: item.rest)
-    }
-
-    var sessionDue: DueBreak? {
-        guard enabled, session.enabled else { return nil }
-        return DueBreak(message: session.message, durationMs: Int64(max(1, session.minutes)) * 60_000, rest: session.rest, kind: .session)
     }
 
     var overtimeDue: DueBreak? {
@@ -143,7 +124,6 @@ struct BreakPlan: Codable, Equatable {
             items: items,
             cursor: cursor % items.count,
             recurringEnabled: remote.recurringEnabled ?? recurringEnabled,
-            session: remote.sessionBreak ?? session,
             overtime: remote.overtime ?? overtime,
             scheduled: remote.scheduled ?? scheduled
         )
@@ -156,7 +136,6 @@ struct BreakPlan: Codable, Equatable {
             items: items.map { BreakItemPayload(id: $0.id.uuidString.lowercased(), message: $0.message, minutes: $0.minutes, rest: $0.rest) },
             updatedAtMs: nil,
             recurringEnabled: recurringEnabled,
-            sessionBreak: session,
             overtime: overtime,
             scheduled: scheduled
         )

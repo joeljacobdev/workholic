@@ -287,6 +287,8 @@ async function settings(request: Request, env: Env): Promise<Response> {
     username: result.username,
     timezone: result.timezone,
     idle_threshold_ms: result.idleThresholdMs,
+    limit_ms: result.limitMs,
+    breaks_updated_at_ms: result.breaksUpdatedAtMs,
   });
 }
 

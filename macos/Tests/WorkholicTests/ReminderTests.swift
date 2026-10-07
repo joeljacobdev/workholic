@@ -88,14 +88,6 @@ final class ReminderTests: XCTestCase {
         XCTAssertEqual(next.awayMs, 0)
     }
 
-    func testSleepDoesNotClearASession() {
-        let session = BudgetSession(budgetMs: SessionBudget.shortMs, attendedMs: 10 * 60_000)
-        let state = ReminderState(stretchMs: 10 * 60_000, session: session)
-        let (next, _) = reminderStep(state: state, tick: ReminderTick(slept: true), config: config)
-        XCTAssertEqual(next.session, session)
-        XCTAssertEqual(next.stretchMs, 0)
-    }
-
     func testCallHoldsTheBreakUntilTheMicAndCameraAreOff() {
         var state = ReminderState(stretchMs: 49 * 60_000)
         var notices: [ReminderNotice] = []
@@ -177,51 +169,6 @@ final class ReminderTests: XCTestCase {
         XCTAssertEqual(notices, [])
         XCTAssertFalse(next.heldBreak)
         XCTAssertEqual(next.stretchMs, 0)
-    }
-
-    func testSessionNotifiesOnceWhenItsBudgetIsReached() {
-        var state = ReminderState(session: BudgetSession(budgetMs: SessionBudget.shortMs))
-        var notices: [ReminderNotice] = []
-        (state, notices) = reminderStep(state: state, tick: ReminderTick(attendedAddMs: 24 * 60_000), config: config)
-        XCTAssertEqual(notices, [])
-        (state, notices) = reminderStep(state: state, tick: ReminderTick(attendedAddMs: 60_000), config: config)
-        XCTAssertEqual(notices, [.sessionBudget(attendedMs: 25 * 60_000 as Int64, budgetMs: 25 * 60_000 as Int64)])
-        (state, notices) = reminderStep(state: state, tick: ReminderTick(attendedAddMs: 60_000), config: config)
-        XCTAssertEqual(notices, [])
-        XCTAssertEqual(state.session?.attendedMs, 26 * 60_000)
-        XCTAssertEqual(state.session?.notified, true)
-    }
-
-    func testSessionReachedDuringACallIsDeliveredWhenTheCallEnds() {
-        var state = ReminderState(session: BudgetSession(budgetMs: 60_000, attendedMs: 40_000))
-        var notices: [ReminderNotice] = []
-        (state, notices) = reminderStep(
-            state: state,
-            tick: ReminderTick(attendedAddMs: 20_000, onCall: true),
-            config: config
-        )
-        XCTAssertEqual(notices, [])
-        XCTAssertTrue(state.heldSession)
-
-        (state, notices) = reminderStep(state: state, tick: ReminderTick(gapMs: 20_000), config: config)
-        XCTAssertEqual(notices, [.sessionBudget(attendedMs: 60_000, budgetMs: 60_000)])
-        XCTAssertFalse(state.heldSession)
-        XCTAssertEqual(state.session?.notified, true)
-    }
-
-    func testAwayDoesNotDropAHeldSession() {
-        let state = ReminderState(
-            session: BudgetSession(budgetMs: 60_000, attendedMs: 60_000, notified: true),
-            heldSession: true
-        )
-        let (next, notices) = reminderStep(
-            state: state,
-            tick: ReminderTick(gapMs: 5 * 60_000, onCall: true),
-            config: config
-        )
-        XCTAssertEqual(notices, [])
-        XCTAssertTrue(next.heldSession)
-        XCTAssertEqual(next.session?.attendedMs, 60_000)
     }
 
     func testAttendedAddCountsOnlyExtendedTime() {

@@ -1,6 +1,5 @@
 import AppKit
 import Foundation
-import UserNotifications
 import WorkholicCore
 
 @MainActor
@@ -9,13 +8,15 @@ final class AppModel {
     private var config = CaptureConfig()
     private var timer: Timer?
     private var syncTimer: Timer?
+    /// Asks the account every few seconds whether settings changed elsewhere.
+    private var settingsTimer: Timer?
+    /// A break push or pull is in flight, so a second one does not race it.
+    private var breaksBusy = false
     private var lastSample: MachineSample?
-    private(set) var statusLine = "Starting"
-    private(set) var syncedLine = "Not signed in. Time stays on this Mac."
+    /// Something that needs the user: a failed login or sync. Nil when all is well.
+    private(set) var problem: String?
     private(set) var reminder = ReminderState()
     private(set) var onCall = false
-    private var reminderLine: String?
-    private var banners: Set<Banner> = []
     private var ceilingMs: Int64?
     private var syncedCreditedMs: Int64?
     private var plan = BreakPlan.load()
@@ -25,6 +26,7 @@ final class AppModel {
     private var budgetMode = BudgetStore.mode()
     private var dayPlan = BudgetStore.plan()
     private let dayEditor = DayPlanEditor()
+    private let appWindow = AppWindow()
     private var civilDaySeen = civilDay(Date())
     /// A day-start prompt was due while a pause or a call had the screen.
     private var dayPlanDeferred = false
@@ -39,15 +41,13 @@ final class AppModel {
     private var scheduledHandled: [String: String]
     private let pauseOverlay = PauseOverlay()
     private let power = PowerAssertion()
+    /// Keeps the display on while a break covers it, so the break is a dark screen, not a sleeping one.
+    private let breakPower = PowerAssertion()
     /// Set while pause mode is on, including a five-minute peek.
     private var pausedSince: Date?
     /// Runs during "Unpause for 5 minutes", then brings the pause cover back.
     private var peekTimer: Timer?
     var onChange: (() -> Void)?
-
-    private enum Banner: Hashable {
-        case sessionBudget
-    }
 
     private let defaults = UserDefaults.standard
 
@@ -55,6 +55,9 @@ final class AppModel {
     private static let breaksDirtyKey = "breakPlanDirty"
     /// The account's `updated_at_ms` for the break settings this Mac last stored or adopted.
     private static let breaksSyncedAtKey = "breakPlanSyncedAt"
+    /// When this Mac's unsent break edit was made, to compare with an edit made elsewhere.
+    private static let breaksEditedAtKey = "breakPlanEditedAt"
+    private static let settingsEverySeconds: TimeInterval = 10
     private static let scheduledHandledKey = "scheduledHandled"
 
     init(store: LocalStore) {
@@ -67,6 +70,7 @@ final class AppModel {
         pauseOverlay.onUnpause = { [weak self] in self?.unpause() }
         pauseOverlay.onPeek = { [weak self] in self?.peek() }
         dayEditor.onSave = { [weak self] saved in self?.replaceDayPlan(saved) }
+        appWindow.onRequest = { [weak self] request in self?.handle(request) }
         store.setBootId(bootIdentifier())
         store.closeOpenAtLaunch()
         let center = NSWorkspace.shared.notificationCenter
@@ -75,13 +79,15 @@ final class AppModel {
     }
 
     func start() {
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
         tick()
         timer = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
         syncTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.scheduleSync() }
+        }
+        settingsTimer = Timer.scheduledTimer(withTimeInterval: Self.settingsEverySeconds, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.schedulePull() }
         }
         scheduleSync()
         promptDayPlanIfNeeded()
@@ -90,11 +96,13 @@ final class AppModel {
     func stop() {
         timer?.invalidate()
         syncTimer?.invalidate()
+        settingsTimer?.invalidate()
         countdownTimer?.invalidate()
         peekTimer?.invalidate()
         overlay.hide()
         pauseOverlay.hide()
         power.release()
+        breakPower.release()
         store.seal()
         onChange?()
     }
@@ -111,33 +119,31 @@ final class AppModel {
     var statusBadge: String? {
         if isPaused { return "Paused" }
         if covering { return "Break" }
-        if banners.contains(.sessionBudget) { return "Session" }
         return nil
+    }
+
+    /// Today's looking and the ceiling it counts against.
+    /// Fixed mode counts every device: the account's last merge, or this Mac if it is ahead.
+    /// Dynamic mode uses today's task total and this Mac only. That total is not the standing limit.
+    func todayUsage(now: Date = Date()) -> (usedMs: Int64, ceilingMs: Int64?) {
+        let range = dayRange(now)
+        let local = store.attendedMs(dayStart: range.start, dayEnd: range.end)
+        if budgetMode == .dynamic {
+            return (local, budgetForDay(dayPlan, today: civilDay(now)).map { dayBudgetMs($0.tasks) })
+        }
+        return (max(syncedCreditedMs ?? 0, local), ceilingMs)
     }
 
     /// How much of today's budget is used, for the menu bar gauge. Nil when no budget is set.
     var usageFraction: Double? {
-        let now = Date()
-        let range = dayRange(now)
-        let local = store.attendedMs(dayStart: range.start, dayEnd: range.end)
-        let used: Int64
-        let ceiling: Int64
-        if budgetMode == .dynamic {
-            guard let todayPlan = budgetForDay(dayPlan, today: civilDay(now)) else { return nil }
-            used = local
-            ceiling = dayBudgetMs(todayPlan.tasks)
-        } else {
-            guard let ceilingMs else { return nil }
-            used = max(syncedCreditedMs ?? 0, local)
-            ceiling = ceilingMs
-        }
-        guard ceiling > 0 else { return used > 0 ? 1 : 0 }
-        return Double(used) / Double(ceiling)
+        let usage = todayUsage()
+        guard let ceiling = usage.ceilingMs else { return nil }
+        guard ceiling > 0 else { return usage.usedMs > 0 ? 1 : 0 }
+        return Double(usage.usedMs) / Double(ceiling)
     }
 
-    var sessionActive: Bool { reminder.session != nil }
-
-    func promptLogin() {
+    /// Logs in, then runs `then` once this Mac is enrolled. Cancelling skips it.
+    func promptLogin(then: (() -> Void)? = nil) {
         let username = NSTextField(string: defaults.string(forKey: "username") ?? "")
         let password = NSSecureTextField(string: "")
         username.placeholderString = "Username"
@@ -158,12 +164,15 @@ final class AppModel {
         let name = username.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let secret = password.stringValue
         guard !name.isEmpty, secret.count >= 8 else {
-            statusLine = "Need a username and a password of at least 8 characters."
+            problem = "Need a username and a password of at least 8 characters."
             onChange?()
             return
         }
         defaults.set(name, forKey: "username")
-        Task { await self.login(username: name, password: secret) }
+        Task {
+            await self.login(username: name, password: secret)
+            if self.signedIn { then?() }
+        }
     }
 
     func logout() {
@@ -171,104 +180,96 @@ final class AppModel {
         TokenStore.delete("device")
         defaults.removeObject(forKey: Self.breaksDirtyKey)
         defaults.removeObject(forKey: Self.breaksSyncedAtKey)
+        defaults.removeObject(forKey: Self.breaksEditedAtKey)
         ceilingMs = nil
         syncedCreditedMs = nil
-        syncedLine = "Not signed in. Time stays on this Mac."
-        statusLine = "Signed out. Local recording continues."
+        problem = nil
+        appWindow.close()
         onChange?()
     }
 
+    /// The dashboard or settings window. Logged out, it asks for a login first.
+    func openWindow(tab: String) {
+        guard let token = TokenStore.get("session") else {
+            promptLogin { [weak self] in self?.openWindow(tab: tab) }
+            return
+        }
+        appWindow.show(tab: tab, token: token, state: macState)
+    }
+
+    /// What the page's "This Mac" panel shows. These settings live on this Mac, not in the account.
+    private var macState: [String: Any] {
+        [
+            "version": appVersion(),
+            "openAtLogin": LoginItem.isOn,
+            "openAtLoginNeedsApproval": LoginItem.needsApproval,
+            "budgetMode": usesTasks ? "dynamic" : "fixed",
+            "hasTodayPlan": hasTodayPlan,
+        ]
+    }
+
+    private func handle(_ request: AppWindow.Request) {
+        switch request {
+        case .openAtLogin(let on):
+            LoginItem.set(on)
+        case .budgetMode(let dynamic):
+            if dynamic { useDynamicBudget() } else { useFixedBudget() }
+        case .planToday:
+            editDayPlan()
+        case .logOut:
+            logout()
+            return
+        case .saved:
+            schedulePull()
+        }
+        appWindow.update(state: macState)
+    }
+
+    /// What the menu says before its commands: today's looking, the next break, and a problem if there is one.
+    /// Upload bookkeeping stays out of it: the count already includes time not yet uploaded.
     func menuLines() -> [String] {
-        let now = Date()
-        let range = dayRange(now)
-        let local = store.attendedMs(dayStart: range.start, dayEnd: range.end)
-        let unsent = store.unsentMs(dayStart: range.start, dayEnd: range.end)
         var lines: [String] = []
-        if isPaused {
-            lines.append(pauseCovering
-                ? "Paused. Not counted, and this Mac stays awake."
-                : "Unpaused for 5 minutes. The pause comes back.")
-        }
-        if let reminderLine { lines.append(reminderLine) }
-        if budgetMode == .dynamic {
-            lines.append("Budget: tasks for today")
-            if let todayPlan = budgetForDay(dayPlan, today: civilDay(now)) {
-                let ceiling = dayBudgetMs(todayPlan.tasks)
-                lines.append("On this Mac: \(formatDuration(local)) of \(formatDuration(ceiling))")
-                let shown = todayPlan.tasks.prefix(8)
-                for task in shown {
-                    lines.append(taskLine(task))
-                }
-                let extra = todayPlan.tasks.count - shown.count
-                if extra > 0 { lines.append("\(extra) more") }
-            } else {
-                lines.append("On this Mac: \(formatDuration(local))")
-                lines.append("Today: set tasks for this day")
-            }
+        let usage = todayUsage()
+        if let ceiling = usage.ceilingMs {
+            var line = "Today: \(formatDuration(usage.usedMs)) of \(formatDuration(ceiling))"
+            if usage.usedMs > ceiling { line += ", \(formatDuration(usage.usedMs - ceiling)) over" }
+            lines.append(line)
+        } else if usesTasks {
+            lines.append("Today: \(formatDuration(usage.usedMs)). Plan today to set a budget.")
         } else {
-            lines.append("Budget: fixed daily limit")
-            lines.append("On this Mac: \(formatDuration(local))")
-            if let ceiling = ceilingMs {
-                lines.append("Limit: \(formatDuration(ceiling))")
-                let counted = formatDuration(syncedCreditedMs ?? 0)
-                lines.append("Synced: \(counted) of \(formatDuration(ceiling))")
-            } else if signedIn {
-                lines.append("Limit: not set")
-                lines.append(syncedLine)
-            } else {
-                lines.append("Limit: sign in to set one")
-                lines.append(syncedLine)
-            }
+            lines.append("Today: \(formatDuration(usage.usedMs))")
         }
-        lines.append("Not uploaded: \(formatDuration(unsent))")
-        if !plan.enabled {
-            lines.append("Breaks are off.")
-        } else if let active = reminder.activeBreak {
-            lines.append(active.paused ? "Pause is waiting until the call ends." : "Pause is on the screen.")
-        } else if overtimeInCharge {
-            let left = max(0, plan.overtimeAfterMs - reminder.overtimeMs)
-            let when = left < 60_000 ? "less than a minute" : formatDuration(left)
-            lines.append("Past the limit. Next pause in \(when): \(plan.overtime.message)")
-        } else if plan.recurringEnabled, let next = plan.upcoming {
-            let left = max(0, plan.everyMs - reminder.stretchMs)
-            let when = left < 60_000 ? "less than a minute" : formatDuration(left)
-            lines.append("Next pause in \(when): \(next.message)")
+        if let line = breakLine() { lines.append(line) }
+        if !signedIn {
+            lines.append("Not logged in. Time stays on this Mac.")
+        } else if let problem {
+            lines.append(problem)
         }
-        if plan.enabled {
-            if let snoozed = reminder.snoozed {
-                lines.append("Back in under 5 minutes: \(snoozed.message)")
-            }
-            if let waiting = reminder.extraDue {
-                lines.append("Waiting to show: \(waiting.message)")
-            }
-        }
-        if reminder.stretchMs >= 60_000 {
-            lines.append("At it for \(formatDuration(reminder.stretchMs))")
-        }
-        if let session = reminder.session {
-            let label = session.notified ? "Session done" : "Session"
-            lines.append("\(label): \(formatDuration(session.attendedMs)) of \(formatDuration(session.budgetMs))")
-        }
-        if onCall {
-            let waiting = reminder.heldBreak || reminder.heldSession
-            lines.append(waiting ? "On a call. The reminder waits until it ends." : "On a call.")
-        }
-        lines.append(statusLine)
-        lines.append("Version \(appVersion())")
         return lines
     }
 
-    /// What is left under the ceiling for the active mode.
-    /// Fixed mode uses the standing limit and the larger of this Mac and the last sync.
-    /// Dynamic mode uses today's task total and this Mac only. That total is not the standing limit.
-    func restOfTodayMs(now: Date = Date()) -> Int64? {
-        guard let ceiling = committedMs(now: now) else { return nil }
-        let range = dayRange(now)
-        let local = store.attendedMs(dayStart: range.start, dayEnd: range.end)
-        let used = budgetMode == .dynamic ? local : max(local, syncedCreditedMs ?? 0)
-        let rest = ceiling - used
-        guard rest >= 60_000 else { return nil }
-        return rest
+    private func breakLine() -> String? {
+        if isPaused {
+            return pauseCovering ? "Paused. Not counted, and this Mac stays awake." : "Unpaused for 5 minutes."
+        }
+        guard plan.enabled else { return "Breaks are off." }
+        if let active = reminder.activeBreak {
+            return active.paused ? "Break waits until the call ends." : "On a break."
+        }
+        if reminder.snoozed != nil { return "Break back in under 5 minutes." }
+        if onCall && (reminder.heldBreak || reminder.extraDue != nil) { return "Break waits until the call ends." }
+        if reminder.extraDue != nil { return "Break coming up." }
+        if overtimeInCharge {
+            return "Past the limit. Next break in \(within(plan.overtimeAfterMs - reminder.overtimeMs))."
+        }
+        if plan.recurringEnabled, plan.upcoming != nil {
+            return "Next break in \(within(plan.everyMs - reminder.stretchMs))."
+        }
+        return nil
+    }
+
+    private func within(_ ms: Int64) -> String {
+        ms < 60_000 ? "less than a minute" : formatDuration(ms)
     }
 
     func useFixedBudget() {
@@ -295,7 +296,7 @@ final class AppModel {
     func replaceDayPlan(_ saved: DayBudget) {
         let today = civilDay(Date())
         guard saved.day == today else {
-            statusLine = "That list was for another day, so it was not kept."
+            // That list was for another day. Ask again for today's.
             dayPlanDeferred = true
             onChange?()
             return
@@ -303,91 +304,20 @@ final class AppModel {
         dayPlan = saved
         BudgetStore.savePlan(saved)
         dayPlanDeferred = false
-        statusLine = "Today is \(formatDuration(dayBudgetMs(saved.tasks)))."
+        appWindow.update(state: macState)
         onChange?()
-    }
-
-    func startSession(budgetMs: Int64) {
-        guard budgetMs > 0 else { return }
-        reminder.session = BudgetSession(budgetMs: budgetMs)
-        reminder.heldSession = false
-        banners.remove(.sessionBudget)
-        if banners.isEmpty { reminderLine = nil }
-        onChange?()
-    }
-
-    func stopSession() {
-        reminder.session = nil
-        reminder.heldSession = false
-        banners.remove(.sessionBudget)
-        if banners.isEmpty { reminderLine = nil }
-        onChange?()
-    }
-
-    /// The menu opened, so the status-item title can go back to normal.
-    func acknowledgeBanner() {
-        banners.removeAll()
-        reminderLine = nil
     }
 
     func editBreaks() {
         editor.show(plan: plan)
     }
 
-    func promptLimit() {
-        guard signedIn else {
-            statusLine = "Log in before setting the limit."
-            onChange?()
-            return
-        }
-        let hours = NSTextField(string: "")
-        hours.placeholderString = "Hours, such as 7"
-        hours.frame = NSRect(x: 0, y: 0, width: 220, height: 24)
-        let alert = NSAlert()
-        alert.messageText = "Daily limit"
-        alert.informativeText = "This applies to today, and it stays until you change it. Changing it tomorrow does not rewrite today."
-        alert.addButton(withTitle: "Set")
-        alert.addButton(withTitle: "Cancel")
-        alert.accessoryView = hours
-        NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let value = Double(hours.stringValue.trimmingCharacters(in: .whitespaces)) ?? -1
-        guard value >= 0, value <= 24 else {
-            statusLine = "Enter a limit from 0 to 24 hours."
-            onChange?()
-            return
-        }
-        let limitMs = Int64((value * 3_600_000).rounded())
-        Task { await self.commitLimit(limitMs) }
-    }
-
-    private func commitLimit(_ limitMs: Int64) async {
-        guard let session = TokenStore.get("session") else { return }
-        do {
-            let api = ApiClient(baseURL: ApiOrigin.baseURL)
-            try await api.setLimit(sessionToken: session, limitMs: limitMs)
-            statusLine = "Limit is \(formatDuration(limitMs)) until you change it."
-            await sync()
-        } catch {
-            statusLine = "Could not set the limit. \(error)"
-            onChange?()
-        }
-    }
-
     var breaksEnabled: Bool { plan.enabled }
 
     func skipActiveBreak() {
-        guard let active = reminder.activeBreak else { return }
+        guard reminder.activeBreak != nil else { return }
         reminder = skipBreak(state: reminder)
         endBreak()
-        switch active.kind {
-        case .recurring:
-            statusLine = "Break skipped. The next one is \(formatDuration(plan.everyMs)) away."
-        case .manual:
-            statusLine = "Break ended."
-        case .session, .overtime, .scheduled:
-            statusLine = "Break skipped."
-        }
         onChange?()
     }
 
@@ -397,7 +327,6 @@ final class AppModel {
         guard held != nil else { return }
         reminder = next
         endBreak()
-        statusLine = "Break moved 5 minutes later."
         onChange?()
     }
 
@@ -439,7 +368,6 @@ final class AppModel {
                 self?.coverForPause()
             }
         }
-        statusLine = "Unpaused for 5 minutes."
         onChange?()
     }
 
@@ -450,7 +378,6 @@ final class AppModel {
         peekTimer = nil
         pauseOverlay.hide()
         power.release()
-        statusLine = "Unpaused."
         tick()
     }
 
@@ -472,13 +399,45 @@ final class AppModel {
         replacePlan(next)
     }
 
-    /// A local edit. Signed in, it is pushed to the account; signed out, it stays on this Mac.
+    /// A local edit. Signed in, it goes to the account right away; signed out, it stays on this Mac.
     func replacePlan(_ saved: BreakPlan) {
         applyPlan(saved)
         if signedIn {
             defaults.set(true, forKey: Self.breaksDirtyKey)
-            scheduleSync()
+            defaults.set(NSNumber(value: Int64(Date().timeIntervalSince1970 * 1000)), forKey: Self.breaksEditedAtKey)
+            schedulePull()
         }
+    }
+
+    private func schedulePull() {
+        Task { await self.pullSettings() }
+    }
+
+    /// The quick check: one small request for the limit and when breaks last changed.
+    /// Breaks are fetched or pushed only when one side moved. Readings still upload on the slower sync.
+    private func pullSettings() async {
+        guard let session = TokenStore.get("session") else { return }
+        let api = ApiClient(baseURL: ApiOrigin.baseURL)
+        do {
+            let settings = try await api.settings(token: session)
+            config.idleThresholdMs = settings.idleThresholdMs
+            // An older server sends neither field; then the limit waits for the full sync.
+            if let breaksAt = settings.breaksUpdatedAtMs {
+                ceilingMs = settings.limitMs
+                if defaults.bool(forKey: Self.breaksDirtyKey) || breaksAt != syncedBreaksAt {
+                    try await syncBreaks(api: api, session: session)
+                }
+            }
+            onChange?()
+        } catch {
+            let text = String(describing: error)
+            if text.contains("bad_token") || text.contains("401") { logout() }
+            // Anything else is a missed check. The next one is seconds away.
+        }
+    }
+
+    private var syncedBreaksAt: Int64 {
+        (defaults.object(forKey: Self.breaksSyncedAtKey) as? NSNumber)?.int64Value ?? 0
     }
 
     private func applyPlan(_ next: BreakPlan) {
@@ -493,8 +452,7 @@ final class AppModel {
             endBreak()
         }
         if let waiting = reminder.extraDue {
-            let kept = waiting.kind == .session ? plan.sessionDue != nil : plan.overtimeDue != nil
-            if !kept { reminder.extraDue = nil }
+            if waiting.kind == .overtime, plan.overtimeDue == nil { reminder.extraDue = nil }
         }
         if plan.overtimeAfterMs == 0 {
             reminder.overtimeMs = 0
@@ -503,7 +461,6 @@ final class AppModel {
             let kept: Bool
             switch held.kind {
             case .recurring: kept = plan.due != nil
-            case .session: kept = plan.sessionDue != nil
             case .overtime: kept = plan.overtimeDue != nil
             case .scheduled: kept = plan.scheduledEntries.contains { $0.id == held.scheduleId }
             case .manual: kept = true
@@ -520,18 +477,28 @@ final class AppModel {
         onChange?()
     }
 
-    /// The account copy wins unless this Mac has unsent edits, or the account has never stored one.
+    /// The latest edit wins. An unsent edit here goes up unless the account changed after it was made;
+    /// then the account's newer copy replaces it. With no edit here, a changed account copy is adopted.
     private func syncBreaks(api: ApiClient, session: String) async throws {
+        guard !breaksBusy else { return }
+        breaksBusy = true
+        defer { breaksBusy = false }
         let remote = try await api.breaks(token: session)
         let remoteAt = remote.updatedAtMs ?? 0
-        let syncedAt = (defaults.object(forKey: Self.breaksSyncedAtKey) as? NSNumber)?.int64Value ?? 0
-        if defaults.bool(forKey: Self.breaksDirtyKey) || remoteAt == 0 {
+        let syncedAt = syncedBreaksAt
+        let editedAt = (defaults.object(forKey: Self.breaksEditedAtKey) as? NSNumber)?.int64Value ?? 0
+        let dirty = defaults.bool(forKey: Self.breaksDirtyKey)
+        let remoteIsNewer = remoteAt > syncedAt && remoteAt > editedAt
+        if remoteAt == 0 || (dirty && !remoteIsNewer) {
             let saved = try await api.saveBreaks(sessionToken: session, settings: plan.payload)
-            defaults.set(false, forKey: Self.breaksDirtyKey)
             defaults.set(NSNumber(value: saved.updatedAtMs ?? 0), forKey: Self.breaksSyncedAtKey)
         } else if remoteAt > syncedAt {
             applyPlan(plan.adopting(remote))
             defaults.set(NSNumber(value: remoteAt), forKey: Self.breaksSyncedAtKey)
+        }
+        // Another edit made while this one was in flight stays marked for the next check.
+        if ((defaults.object(forKey: Self.breaksEditedAtKey) as? NSNumber)?.int64Value ?? 0) == editedAt {
+            defaults.set(false, forKey: Self.breaksDirtyKey)
         }
     }
 
@@ -607,8 +574,7 @@ final class AppModel {
                 dueBreak: overtimeInCharge ? nil : plan.due,
                 overLimit: over,
                 overtimeAfterMs: plan.overtimeAfterMs,
-                overtimeBreak: plan.overtimeDue,
-                sessionBreak: plan.sessionDue
+                overtimeBreak: plan.overtimeDue
             ),
             config: stepConfig
         )
@@ -687,13 +653,7 @@ final class AppModel {
         committedBudgetMs(mode: budgetMode, fixedMs: ceilingMs, dayPlan: dayPlan, today: civilDay(now))
     }
 
-    private func taskLine(_ task: DayTask) -> String {
-        let trimmed = task.name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let name = trimmed.count > 48 ? String(trimmed.prefix(47)) + "…" : trimmed
-        return "\(name): \(formatDuration(min(max(0, task.budgetMs), DayBudgetRule.capMs)))"
-    }
-
-    private func scheduleSync() {
+    func scheduleSync() {
         Task { await self.sync() }
     }
 
@@ -708,10 +668,10 @@ final class AppModel {
                 displayName: Host.current().localizedName ?? "Mac"
             )
             TokenStore.set("device", enrolled.deviceToken)
-            statusLine = "Signed in as \(session.username)"
+            problem = nil
             await sync()
         } catch {
-            statusLine = "Login failed. \(error)"
+            problem = "Login failed. \(error)"
             onChange?()
         }
     }
@@ -737,20 +697,14 @@ final class AppModel {
             if let today = stats.days.first {
                 ceilingMs = today.ceilingMs
                 syncedCreditedMs = today.creditedMs
-                if let ceiling = today.ceilingMs {
-                    syncedLine = "Synced today: \(formatDuration(today.creditedMs)) of \(formatDuration(ceiling))"
-                } else {
-                    syncedLine = "Synced today: \(formatDuration(today.creditedMs)). No ceiling yet."
-                }
             }
-            statusLine = breakNote ?? "Signed in as \(settings.username)"
+            problem = breakNote
         } catch {
             let text = String(describing: error)
             if text.contains("bad_token") || text.contains("401") {
                 logout()
-                statusLine = "Session rejected. Log in again. Local recording continues."
             } else {
-                statusLine = "Not syncing. \(text)"
+                problem = "Not syncing. Today may be missing other devices. \(text)"
             }
         }
         onChange?()
@@ -810,19 +764,9 @@ final class AppModel {
             case .resumeBreak(let active):
                 present(active)
             case .hideBreak:
-                overlay.hide()
-                covering = false
+                uncover()
             case .breakFinished:
                 endBreak()
-            case .sessionBudget(_, let budgetMs):
-                let content = UNMutableNotificationContent()
-                content.title = "Session done"
-                content.body = "This session reached \(formatDuration(budgetMs)) of attention."
-                content.sound = .default
-                banners.insert(.sessionBudget)
-                if reminderLine == nil { reminderLine = content.body }
-                let request = UNNotificationRequest(identifier: "workholic.session", content: content, trigger: nil)
-                UNUserNotificationCenter.current().add(request)
             }
         }
     }
@@ -831,6 +775,7 @@ final class AppModel {
         // Time behind the cover is not counted, starting now rather than at the next sample.
         if !covering { store.seal() }
         covering = true
+        breakPower.hold(reason: "A Workholic break is on the screen.")
         overlay.show(message: active.message, remainingMs: active.remainingMs, snoozable: active.kind != .manual)
         guard countdownTimer == nil else { return }
         lastCountdownAt = Date()
@@ -839,9 +784,15 @@ final class AppModel {
         }
     }
 
-    private func endBreak() {
+    /// Takes the cover down. The break itself may still be held for a call.
+    private func uncover() {
         overlay.hide()
         covering = false
+        breakPower.release()
+    }
+
+    private func endBreak() {
+        uncover()
         countdownTimer?.invalidate()
         countdownTimer = nil
         lastCountdownAt = nil
@@ -868,8 +819,7 @@ final class AppModel {
             endBreak()
             onChange?()
         case .hideForCall:
-            overlay.hide()
-            covering = false
+            uncover()
             onChange?()
         case .resume(let active):
             present(active)

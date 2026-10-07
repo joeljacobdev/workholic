@@ -162,17 +162,6 @@ final class LocalStore {
         )
     }
 
-    func unsentMs(dayStart: Int64, dayEnd: Int64) -> Int64 {
-        sumClipped(
-            """
-            SELECT start_wall_ms, end_wall_ms FROM local_interval
-            WHERE sealed = 1 AND uploaded = 0 AND duration_ms > 0 AND end_wall_ms > ? AND start_wall_ms < ?
-            """,
-            dayStart: dayStart,
-            dayEnd: dayEnd
-        )
-    }
-
     private func start(appKey: String, displayName: String, wallMs: Int64, uptimeMs: Int64) {
         if openId != nil { seal() }
         let id = UUID().uuidString.lowercased()

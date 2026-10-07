@@ -107,6 +107,7 @@
       </div>
       <div class="panel">
         <h2>Breaks</h2>
+        <p class="muted small">A session is the time you spend looking at a screen between breaks. You never start one. It begins when you sit down and ends when you step away. A break is the prompt to step away: the screen goes dark until it is over.</p>
         <form id="breaks-form">
           <label class="check"><input type="checkbox" id="breaks-enabled"> Show breaks on my Macs</label>
           <fieldset id="breaks-detail">
@@ -117,16 +118,6 @@
               minutes of looking</label>
             <ol id="breaks-items" class="break-items"></ol>
             <button type="button" id="breaks-add" class="link">Add a pause</button>
-
-            <h3>After a session</h3>
-            <label class="check"><input type="checkbox" id="session-enabled"> Cover the screen when a session budget is reached</label>
-            <div class="break-rule">
-              <input id="session-message" class="msg" maxlength="200" placeholder="What this pause is for" aria-label="Session pause message">
-              <div class="opts">
-                <label><input id="session-minutes" type="number" min="1" max="180" inputmode="numeric" aria-label="Session pause minutes">min</label>
-                <label><input id="session-rest" type="checkbox">Screen off ends it</label>
-              </div>
-            </div>
 
             <h3>Past the daily limit</h3>
             <label class="check"><input type="checkbox" id="overtime-enabled"> Keep pausing once today’s limit is reached</label>
@@ -150,7 +141,17 @@
           <button type="submit" class="primary" id="breaks-save">Save breaks</button>
         </form>
         <p id="breaks-status" class="muted small" role="status"></p>
-        <p class="muted small">Breaks run in the Mac app. Each Mac picks up changes within 5 minutes. Every automatic break offers “5 more minutes”; you can also start one from the Mac’s menu bar.</p>
+        <p class="muted small">Breaks run in the Mac app, on each Mac by itself. Time on another device during a break still counts toward today. Changes reach every Mac and browser within about 10 seconds; if two places change breaks, the later save wins. Every automatic break offers “5 more minutes”; you can also start one from the Mac’s menu bar.</p>
+      </div>
+      <div id="mac-panel" class="panel" hidden>
+        <h2>This Mac</h2>
+        <label class="check"><input type="checkbox" id="mac-login"> Open Workholic at login</label>
+        <p id="mac-login-note" class="muted small" hidden>macOS needs your OK: turn Workholic on in System Settings › General › Login Items.</p>
+        <h3>Budget on this Mac</h3>
+        <label class="check"><input type="radio" name="mac-mode" value="fixed" id="mac-mode-fixed"> Daily limit (the one above, counted across devices)</label>
+        <label class="check"><input type="radio" name="mac-mode" value="dynamic" id="mac-mode-dynamic"> Today’s tasks (planned each morning, this Mac only)</label>
+        <button type="button" id="mac-plan" class="link" hidden>Plan today…</button>
+        <p class="muted small">These stay on this Mac. <span id="mac-version"></span></p>
       </div>
       <div class="panel">
         <h2>Devices</h2>
@@ -164,7 +165,7 @@
         <div class="row"><span>Idle after</span><strong id="set-idle">–</strong></div>
         <p class="muted small">Timezone and password are changed with the operator CLI.</p>
       </div>
-      <button type="button" id="logout" class="danger">Log out on this browser</button>
+      <button type="button" id="logout" class="danger">Log out of this browser</button>
     </section>
   </div>
 

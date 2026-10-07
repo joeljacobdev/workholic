@@ -1,7 +1,8 @@
 import AppKit
 import WorkholicCore
 
-/// Edits every kind of pause: every few minutes, after a session, past the daily limit, and at set times.
+/// Edits every kind of pause: every few minutes, past the daily limit, and at set times.
+/// Used while logged out; logged in, the Settings window edits the account's copy.
 @MainActor
 final class BreakEditor: NSObject, NSWindowDelegate {
     var onSave: ((BreakPlan) -> Void)?
@@ -12,7 +13,6 @@ final class BreakEditor: NSObject, NSWindowDelegate {
     private var rows: [Row] = []
     private var list: NSStackView?
     private var ids: [UUID] = []
-    private var session: RuleFields?
     private var overtime: RuleFields?
     private var overtimeEvery: NSTextField?
     private var timeRows: [TimeRow] = []
@@ -29,7 +29,6 @@ final class BreakEditor: NSObject, NSWindowDelegate {
         everyField.stringValue = String(plan.everyMinutes)
         ids = plan.items.map(\.id)
         fill(plan.items)
-        session?.set(enabled: plan.session.enabled, message: plan.session.message, minutes: plan.session.minutes, rest: plan.session.rest)
         overtime?.set(enabled: plan.overtime.enabled, message: plan.overtime.message, minutes: plan.overtime.minutes, rest: plan.overtime.rest)
         overtimeEvery?.stringValue = String(plan.overtime.everyMinutes)
         fillTimes(plan.scheduled)
@@ -45,7 +44,6 @@ final class BreakEditor: NSObject, NSWindowDelegate {
         everyField = nil
         enabledBox = nil
         recurringBox = nil
-        session = nil
         overtime = nil
         overtimeEvery = nil
         timeRows = []
@@ -75,7 +73,6 @@ final class BreakEditor: NSObject, NSWindowDelegate {
 
         let tabs = NSTabView(frame: NSRect(x: 12, y: 52, width: 576, height: 444))
         tabs.addTabViewItem(tab("Every few minutes", recurringTab()))
-        tabs.addTabViewItem(tab("After a session", sessionTab()))
         tabs.addTabViewItem(tab("Past the limit", overtimeTab()))
         tabs.addTabViewItem(tab("At set times", scheduledTab()))
         content.addSubview(tabs)
@@ -208,18 +205,7 @@ final class BreakEditor: NSObject, NSWindowDelegate {
         list.frame = NSRect(x: 0, y: 0, width: 516, height: max(40, height))
     }
 
-    // MARK: After a session, past the limit
-
-    private func sessionTab() -> NSView {
-        let view = NSView(frame: NSRect(origin: .zero, size: Self.tabSize))
-        let fields = RuleFields(title: "Cover the screen when a session budget is reached", in: view, top: 366)
-        let note = NSTextField(wrappingLabelWithString: "Start a session from the menu bar. The “Session done” notification still appears either way.")
-        note.frame = NSRect(x: 10, y: 196, width: 530, height: 40)
-        note.textColor = .secondaryLabelColor
-        view.addSubview(note)
-        session = fields
-        return view
-    }
+    // MARK: Past the limit
 
     private func overtimeTab() -> NSView {
         let view = NSView(frame: NSRect(origin: .zero, size: Self.tabSize))
@@ -359,7 +345,7 @@ final class BreakEditor: NSObject, NSWindowDelegate {
             items.append(BreakItem(id: id, message: message, minutes: minutes, rest: row.rest.state == .on))
         }
         guard !items.isEmpty else { return }
-        guard let sessionRule = session?.read(), let overtimeFields = overtime?.read() else {
+        guard let overtimeFields = overtime?.read() else {
             NSSound.beep()
             return
         }
@@ -384,7 +370,6 @@ final class BreakEditor: NSObject, NSWindowDelegate {
             items: items,
             cursor: 0,
             recurringEnabled: recurringBox?.state != .off,
-            session: sessionRule,
             overtime: OvertimeRule(
                 enabled: overtimeFields.enabled,
                 everyMinutes: overtimeEveryMinutes,
@@ -413,7 +398,7 @@ final class BreakEditor: NSObject, NSWindowDelegate {
     }
 }
 
-/// The on switch, sentence, length, and rest box that session and overtime pauses share.
+/// The on switch, sentence, length, and rest box of the overtime pause.
 @MainActor
 private final class RuleFields {
     private let enabled: NSButton
@@ -450,10 +435,10 @@ private final class RuleFields {
     }
 
     /// Nil when the sentence or the length is out of range.
-    func read() -> SessionBreakRule? {
+    func read() -> (enabled: Bool, message: String, minutes: Int, rest: Bool)? {
         let text = message.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let length = Int(minutes.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0
         guard !text.isEmpty, text.count <= 200, length >= 1, length <= 180 else { return nil }
-        return SessionBreakRule(enabled: enabled.state == .on, message: text, minutes: length, rest: rest.state == .on)
+        return (enabled: enabled.state == .on, message: text, minutes: length, rest: rest.state == .on)
     }
 }

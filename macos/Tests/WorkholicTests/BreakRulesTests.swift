@@ -2,11 +2,10 @@ import WorkholicCore
 import XCTest
 
 final class BreakRulesTests: XCTestCase {
-    private let budget: Int64 = 25 * 60_000
     private let config = ReminderConfig(breakAfterMs: 50 * 60_000, awayResetMs: 5 * 60_000)
     private let rest = DueBreak(message: "Step away from the screen.", durationMs: 5 * 60_000, rest: true)
-    private let sessionRest = DueBreak(message: "Session done.", durationMs: 5 * 60_000, rest: true, kind: .session)
-    private let sessionGrip = DueBreak(message: "Hand grip.", durationMs: 60_000, rest: false, kind: .session)
+    private let waitingRest = DueBreak(message: "Past the limit.", durationMs: 5 * 60_000, rest: true, kind: .overtime)
+    private let waitingGrip = DueBreak(message: "Hand grip.", durationMs: 60_000, rest: false, kind: .overtime)
     private let overtime = DueBreak(message: "Past the limit.", durationMs: 5 * 60_000, rest: true, kind: .overtime)
 
     private func opened(_ due: DueBreak) -> ActiveBreak {
@@ -19,48 +18,32 @@ final class BreakRulesTests: XCTestCase {
         XCTAssertTrue(attending(sample: GateSample(onConsole: true, displayAwake: true, idleMs: 0, bundleId: "com.apple.Terminal"), idleThresholdMs: 120_000))
     }
 
-    func testSessionBreakOpensWhenTheBudgetIsReached() {
-        var state = ReminderState(session: BudgetSession(budgetMs: 25 * 60_000, attendedMs: 24 * 60_000))
+    func testOvertimeBreakWaitsForTheCallToEnd() {
+        var state = ReminderState(overtimeMs: 19 * 60_000)
         var notices: [ReminderNotice] = []
-        (state, notices) = reminderStep(state: state, tick: ReminderTick(attendedAddMs: 60_000, sessionBreak: sessionRest), config: config)
-        XCTAssertEqual(notices, [.sessionBudget(attendedMs: budget, budgetMs: budget), .beginBreak(opened(sessionRest))])
-        XCTAssertEqual(state.activeBreak?.kind, .session)
-        XCTAssertNil(state.extraDue)
-    }
-
-    func testSessionBreakIsOnlyANotificationWhenOff() {
-        var state = ReminderState(session: BudgetSession(budgetMs: 25 * 60_000, attendedMs: 24 * 60_000))
-        var notices: [ReminderNotice] = []
-        (state, notices) = reminderStep(state: state, tick: ReminderTick(attendedAddMs: 60_000), config: config)
-        XCTAssertEqual(notices, [.sessionBudget(attendedMs: budget, budgetMs: budget)])
-        XCTAssertNil(state.activeBreak)
-    }
-
-    func testSessionBreakWaitsForTheCallToEnd() {
-        var state = ReminderState(session: BudgetSession(budgetMs: 25 * 60_000, attendedMs: 24 * 60_000))
-        var notices: [ReminderNotice] = []
-        (state, notices) = reminderStep(state: state, tick: ReminderTick(attendedAddMs: 60_000, onCall: true, sessionBreak: sessionRest), config: config)
+        let past = ReminderTick(attendedAddMs: 60_000, onCall: true, overLimit: true, overtimeAfterMs: 20 * 60_000, overtimeBreak: overtime)
+        (state, notices) = reminderStep(state: state, tick: past, config: config)
         XCTAssertEqual(notices, [])
-        XCTAssertEqual(state.extraDue, sessionRest)
-        (state, notices) = reminderStep(state: state, tick: ReminderTick(gapMs: 20_000, onCall: false, sessionBreak: sessionRest), config: config)
-        XCTAssertEqual(notices, [.sessionBudget(attendedMs: budget, budgetMs: budget), .beginBreak(opened(sessionRest))])
+        XCTAssertEqual(state.extraDue, overtime)
+        (state, notices) = reminderStep(state: state, tick: ReminderTick(gapMs: 20_000, onCall: false), config: config)
+        XCTAssertEqual(notices, [.beginBreak(opened(overtime))])
     }
 
     func testDarkScreenCompletesAWaitingRestButNotAnActivity() {
-        var state = ReminderState(extraDue: sessionRest)
+        var state = ReminderState(extraDue: waitingRest)
         (state, _) = reminderStep(state: state, tick: ReminderTick(displayAwake: false), config: config)
         XCTAssertNil(state.extraDue)
 
-        state = ReminderState(extraDue: sessionGrip)
+        state = ReminderState(extraDue: waitingGrip)
         (state, _) = reminderStep(state: state, tick: ReminderTick(slept: true, displayAwake: false), config: config)
-        XCTAssertEqual(state.extraDue, sessionGrip)
+        XCTAssertEqual(state.extraDue, waitingGrip)
         var notices: [ReminderNotice] = []
         (state, notices) = reminderStep(state: state, tick: ReminderTick(gapMs: 20_000), config: config)
-        XCTAssertEqual(notices, [.beginBreak(opened(sessionGrip))])
+        XCTAssertEqual(notices, [.beginBreak(opened(waitingGrip))])
     }
 
     func testAwayResetDropsAWaitingBreak() {
-        var state = ReminderState(extraDue: sessionGrip)
+        var state = ReminderState(extraDue: waitingGrip)
         (state, _) = reminderStep(state: state, tick: ReminderTick(gapMs: 5 * 60_000, onCall: true), config: config)
         XCTAssertNil(state.extraDue)
     }
@@ -101,23 +84,15 @@ final class BreakRulesTests: XCTestCase {
         XCTAssertEqual(state.stretchMs, 0)
     }
 
-    func testSessionBreakDueDuringAnotherBreakIsDroppedWhenThatBreakEnds() {
+    func testABreakWaitingBehindAnotherIsDroppedWhenThatBreakEnds() {
         let up = opened(rest)
-        var state = ReminderState(
-            stretchMs: 50 * 60_000,
-            breakNotified: true,
-            session: BudgetSession(budgetMs: 25 * 60_000, attendedMs: 24 * 60_000),
-            activeBreak: up
-        )
-        (state, _) = reminderStep(state: state, tick: ReminderTick(attendedAddMs: 60_000, sessionBreak: sessionRest), config: config)
-        XCTAssertEqual(state.activeBreak, up)
-        XCTAssertEqual(state.extraDue, sessionRest)
+        var state = ReminderState(stretchMs: 50 * 60_000, breakNotified: true, activeBreak: up, extraDue: waitingRest)
         var effect: CountdownEffect?
         (state, effect) = countdownBreak(state: state, elapsedMs: 5 * 60_000, displayAwake: true, onCall: false)
         XCTAssertEqual(effect, .finished)
         XCTAssertNil(state.extraDue)
         var notices: [ReminderNotice] = []
-        (state, notices) = reminderStep(state: state, tick: ReminderTick(attendedAddMs: 20_000, sessionBreak: sessionRest), config: config)
+        (state, notices) = reminderStep(state: state, tick: ReminderTick(attendedAddMs: 20_000), config: config)
         XCTAssertEqual(notices, [], "no second break straight after the first")
     }
 

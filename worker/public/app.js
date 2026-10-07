@@ -4,6 +4,7 @@ const TOKEN_KEY = "workholic.session";
 const TABS = ["today", "history", "day", "settings"];
 const GAUGE_CIRCUMFERENCE = 2 * Math.PI * 50;
 const REFRESH_MS = 60_000;
+const SETTINGS_CHECK_MS = 10_000;
 const HOUR_MS = 3_600_000;
 const DEVICE_SLOTS = 5;
 // Credited runs closer than this read as one stretch on the timeline.
@@ -129,6 +130,8 @@ function showLogin(message) {
 function handleFailure(error) {
   if (error instanceof AuthError) {
     writeToken(null);
+    // In the Mac app the session is the Mac's. It logs out and closes this window.
+    if (macBridge) return tellMac("logOut");
     showLogin("Your session ended. Log in again.");
     return;
   }
@@ -660,6 +663,7 @@ async function saveLimit(event) {
   try {
     await api("/v1/limits", { method: "POST", body: { limit_ms: limitMs } });
     $("limit-status").textContent = `Limit saved. Today's limit is now ${formatDuration(limitMs)}.`;
+    tellMac("saved");
   } catch (error) {
     if (error instanceof AuthError) return handleFailure(error);
     $("limit-status").textContent = `Could not save (${error.message}).`;
@@ -675,11 +679,13 @@ const BREAK_ERRORS = {
   bad_items: "Keep between 1 and 20 pauses.",
   bad_item_message: "Every pause needs a short message (up to 200 characters).",
   bad_item_minutes: "Each pause lasts 1 to 180 minutes.",
-  bad_session_break: "The session pause needs a message and 1 to 180 minutes.",
   bad_overtime: "The past-the-limit pause needs a message, 1 to 180 minutes, and a gap of 1 to 240 minutes.",
   bad_scheduled: "Each set time needs a time, a message, and 1 to 180 minutes (up to 10 times).",
 };
 let breaksDirty = false;
+/** The account's `updated_at_ms` for the breaks shown in the form. */
+let breaksAt = null;
+let settingsTimer = null;
 
 function breakRow(item) {
   const row = el("li");
@@ -783,7 +789,6 @@ function renderBreaks(settings) {
   $("breaks-every").value = String(settings.every_minutes);
   $("breaks-items").replaceChildren(...settings.items.map(breakRow));
   syncRemoveButtons();
-  if (settings.session_break) renderRule("session", settings.session_break);
   if (settings.overtime) {
     renderRule("overtime", settings.overtime);
     $("overtime-every").value = String(settings.overtime.every_minutes);
@@ -791,6 +796,23 @@ function renderBreaks(settings) {
   $("scheduled-items").replaceChildren(...(settings.scheduled ?? []).map(scheduledRow));
   syncScheduledAdd();
   breaksDirty = false;
+  breaksAt = settings.updated_at_ms ?? 0;
+}
+
+// While Settings is open, a change made on a Mac or another browser shows up within seconds.
+// Unsaved edits here are left alone: the latest save wins, so saving them replaces the other change.
+async function checkSettings() {
+  try {
+    const latest = await api("/v1/settings");
+    if (latest.breaks_updated_at_ms == null || latest.breaks_updated_at_ms === breaksAt) return;
+    if (breaksDirty) {
+      $("breaks-status").textContent = "Breaks changed on another device. Saving replaces that change with yours.";
+    } else {
+      await loadBreaks();
+    }
+  } catch (error) {
+    if (error instanceof AuthError) handleFailure(error);
+  }
 }
 
 async function loadBreaks() {
@@ -822,7 +844,6 @@ async function saveBreaks(event) {
     every_minutes: Number($("breaks-every").value),
     items,
     recurring_enabled: $("breaks-recurring").checked,
-    session_break: readRule("session"),
     overtime: { ...readRule("overtime"), every_minutes: Number($("overtime-every").value) },
     scheduled,
   };
@@ -830,12 +851,47 @@ async function saveBreaks(event) {
   try {
     renderBreaks(await api("/v1/breaks", { method: "PUT", body }));
     $("breaks-status").textContent = body.enabled ? "Breaks saved. Breaks are on." : "Breaks saved. Breaks are off.";
+    tellMac("saved");
   } catch (error) {
     if (error instanceof AuthError) return handleFailure(error);
     $("breaks-status").textContent = BREAK_ERRORS[error.message] ?? `Could not save (${error.message}).`;
   } finally {
     $("breaks-save").disabled = false;
   }
+}
+
+// ---- Inside the Mac app ----
+// The Mac app shows this same page in its own window, already logged in. There the
+// "This Mac" panel holds the settings that live on that Mac, and logging out logs the Mac out.
+
+const macBridge = window.webkit?.messageHandlers?.workholic ?? null;
+
+function tellMac(action, value) {
+  macBridge?.postMessage({ action, value });
+}
+
+function renderMac(state) {
+  if (!macBridge || !state) return;
+  $("mac-panel").hidden = false;
+  $("mac-login").checked = Boolean(state.openAtLogin);
+  $("mac-login-note").hidden = !state.openAtLoginNeedsApproval;
+  const dynamic = state.budgetMode === "dynamic";
+  $("mac-mode-fixed").checked = !dynamic;
+  $("mac-mode-dynamic").checked = dynamic;
+  $("mac-plan").hidden = !dynamic;
+  $("mac-plan").textContent = state.hasTodayPlan ? "Edit today’s tasks…" : "Plan today…";
+  $("mac-version").textContent = state.version ? `Workholic for Mac, version ${state.version}.` : "";
+}
+
+if (macBridge) {
+  window.workholicMac = { update: renderMac };
+  $("logout").textContent = "Log out of this Mac";
+  $("mac-login").addEventListener("change", (event) => tellMac("openAtLogin", event.target.checked));
+  for (const radio of document.querySelectorAll('input[name="mac-mode"]')) {
+    radio.addEventListener("change", (event) => tellMac("budgetMode", event.target.value));
+  }
+  $("mac-plan").addEventListener("click", () => tellMac("planToday"));
+  renderMac(window.workholicMacState);
 }
 
 // ---- Navigation and refresh ----
@@ -879,11 +935,16 @@ function startRefresh() {
   refreshTimer = setInterval(() => {
     if (document.visibilityState === "visible" && currentTab() !== "settings") refresh();
   }, REFRESH_MS);
+  settingsTimer = setInterval(() => {
+    if (document.visibilityState === "visible" && currentTab() === "settings") checkSettings();
+  }, SETTINGS_CHECK_MS);
 }
 
 function stopRefresh() {
   if (refreshTimer) clearInterval(refreshTimer);
+  if (settingsTimer) clearInterval(settingsTimer);
   refreshTimer = null;
+  settingsTimer = null;
 }
 
 async function enterApp() {
@@ -929,6 +990,7 @@ async function login(event) {
 }
 
 async function logout() {
+  if (macBridge) return tellMac("logOut");
   try {
     await api("/v1/logout", { method: "POST" });
   } catch {
@@ -974,6 +1036,7 @@ if (readToken()) {
   enterApp().catch((error) => {
     if (error instanceof AuthError) {
       writeToken(null);
+      if (macBridge) return tellMac("logOut");
       showLogin();
     } else {
       showLogin("Could not reach Workholic. Check your connection.");

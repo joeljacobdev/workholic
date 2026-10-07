@@ -8,7 +8,11 @@ export interface BreakItem {
   rest: boolean;
 }
 
-/** A pause that covers the screen once a session budget is reached. */
+/**
+ * A pause once a hand-started session budget was reached. Sessions are no longer started by hand
+ * (docs/breaks-and-sessions.md), so no client shows this. It is still accepted and stored because
+ * Macs up to version 12 send it, and its shape is what the overtime pause extends.
+ */
 export interface SessionBreak {
   enabled: boolean;
   message: string;

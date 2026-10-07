@@ -12,29 +12,11 @@ public struct ReminderConfig: Sendable, Equatable {
     }
 }
 
-public enum SessionBudget {
-    public static let shortMs: Int64 = 25 * 60_000
-    public static let longMs: Int64 = 50 * 60_000
-}
-
-public struct BudgetSession: Sendable, Equatable {
-    public var budgetMs: Int64
-    public var attendedMs: Int64
-    public var notified: Bool
-
-    public init(budgetMs: Int64, attendedMs: Int64 = 0, notified: Bool = false) {
-        self.budgetMs = budgetMs
-        self.attendedMs = attendedMs
-        self.notified = notified
-    }
-}
-
 /// What brought a pause on. Every kind shares one screen, one countdown, and Skip.
+/// There is no session to start: a session is the looking between pauses, and a pause ends it.
 public enum BreakKind: String, Sendable, Equatable, Codable {
     /// Every few minutes of looking.
     case recurring
-    /// A session budget was reached.
-    case session
     /// Past the daily limit, after each overtime stretch.
     case overtime
     /// A local clock time, such as lunch.
@@ -97,15 +79,12 @@ public struct ReminderState: Sendable, Equatable {
     public var stretchMs: Int64
     public var awayMs: Int64
     public var breakNotified: Bool
-    public var session: BudgetSession?
     /// The work interval was reached during a call, or an activity break is waiting for the screen.
     public var heldBreak: Bool
-    /// A session budget was reached during a call. Deliver it once the call ends.
-    public var heldSession: Bool
     public var activeBreak: ActiveBreak?
     /// Attended time past the daily limit since the last pause. It resets wherever `stretchMs` does.
     public var overtimeMs: Int64
-    /// A session or overtime pause waiting for the call to end, the screen to wake, or the visible pause to finish.
+    /// An overtime pause waiting for the call to end, the screen to wake, or the visible pause to finish.
     /// Finishing any pause drops it: a pause was just taken.
     public var extraDue: DueBreak?
     /// A pause put off with "5 more minutes". It comes back with the time it had left.
@@ -117,9 +96,7 @@ public struct ReminderState: Sendable, Equatable {
         stretchMs: Int64 = 0,
         awayMs: Int64 = 0,
         breakNotified: Bool = false,
-        session: BudgetSession? = nil,
         heldBreak: Bool = false,
-        heldSession: Bool = false,
         activeBreak: ActiveBreak? = nil,
         overtimeMs: Int64 = 0,
         extraDue: DueBreak? = nil,
@@ -131,9 +108,7 @@ public struct ReminderState: Sendable, Equatable {
         self.stretchMs = stretchMs
         self.awayMs = awayMs
         self.breakNotified = breakNotified
-        self.session = session
         self.heldBreak = heldBreak
-        self.heldSession = heldSession
         self.activeBreak = activeBreak
         self.overtimeMs = overtimeMs
         self.extraDue = extraDue
@@ -145,7 +120,6 @@ public enum ReminderNotice: Sendable, Equatable {
     case resumeBreak(ActiveBreak)
     case hideBreak
     case breakFinished
-    case sessionBudget(attendedMs: Int64, budgetMs: Int64)
 }
 
 public struct ReminderTick: Sendable, Equatable {
@@ -163,8 +137,6 @@ public struct ReminderTick: Sendable, Equatable {
     /// Overtime stretch before an overtime pause. Zero turns overtime pauses off.
     public var overtimeAfterMs: Int64
     public var overtimeBreak: DueBreak?
-    /// The pause to open when a session budget is reached. Nil leaves only the notification.
-    public var sessionBreak: DueBreak?
 
     public init(
         attendedAddMs: Int64 = 0,
@@ -175,8 +147,7 @@ public struct ReminderTick: Sendable, Equatable {
         dueBreak: DueBreak? = nil,
         overLimit: Bool = false,
         overtimeAfterMs: Int64 = 0,
-        overtimeBreak: DueBreak? = nil,
-        sessionBreak: DueBreak? = nil
+        overtimeBreak: DueBreak? = nil
     ) {
         self.attendedAddMs = attendedAddMs
         self.gapMs = gapMs
@@ -187,7 +158,6 @@ public struct ReminderTick: Sendable, Equatable {
         self.overLimit = overLimit
         self.overtimeAfterMs = overtimeAfterMs
         self.overtimeBreak = overtimeBreak
-        self.sessionBreak = sessionBreak
     }
 }
 
@@ -211,7 +181,7 @@ public func attendedAddMs(_ step: CaptureStep) -> Int64 {
     }
 }
 
-/// Advance the work stretch and the budget session by one sample.
+/// Advance the work stretch by one sample.
 ///
 /// The stretch grows only by attended time. It does not grow during a pause.
 /// Sleep, a dark screen, or a real gap of `awayResetMs` clears it: for a rest,
@@ -220,7 +190,6 @@ public func attendedAddMs(_ step: CaptureStep) -> Int64 {
 public func reminderStep(state: ReminderState, tick: ReminderTick, config: ReminderConfig) -> (ReminderState, [ReminderNotice]) {
     var state = state
     var notices: [ReminderNotice] = []
-    recordSession(&state, tick: tick, notices: &notices)
     if state.snoozed != nil {
         state.snoozeLeftMs -= max(0, tick.gapMs)
     }
@@ -340,30 +309,6 @@ public func skipBreak(state: ReminderState) -> ReminderState {
     var state = state
     finishBreakState(&state)
     return state
-}
-
-private func recordSession(_ state: inout ReminderState, tick: ReminderTick, notices: inout [ReminderNotice]) {
-    if tick.attendedAddMs > 0, var session = state.session {
-        session.attendedMs += tick.attendedAddMs
-        if !session.notified && session.budgetMs > 0 && session.attendedMs >= session.budgetMs {
-            session.notified = true
-            if let due = tick.sessionBreak, state.extraDue == nil {
-                state.extraDue = due
-            }
-            if tick.onCall {
-                state.heldSession = true
-            } else {
-                notices.append(.sessionBudget(attendedMs: session.attendedMs, budgetMs: session.budgetMs))
-            }
-        }
-        state.session = session
-    }
-    if !tick.onCall, state.heldSession, let session = state.session {
-        notices.append(.sessionBudget(attendedMs: session.attendedMs, budgetMs: session.budgetMs))
-        state.heldSession = false
-    } else if !tick.onCall, state.heldSession {
-        state.heldSession = false
-    }
 }
 
 private func trackActiveBreak(_ state: inout ReminderState, tick: ReminderTick) -> [ReminderNotice] {

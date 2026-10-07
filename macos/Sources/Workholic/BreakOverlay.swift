@@ -1,6 +1,10 @@
 import AppKit
 
 /// One full-screen window on every display: the user's sentence, a countdown, and a quiet way out.
+///
+/// The screen stays dark, but the words and the countdown fade out a few seconds in, so a long
+/// break is not a clock to watch. They come back for the last three minutes, and for a few
+/// seconds whenever the mouse moves.
 @MainActor
 final class BreakOverlay: NSObject {
     var onSkip: (() -> Void)?
@@ -10,16 +14,39 @@ final class BreakOverlay: NSObject {
     private var countdowns: [NSTextField] = []
     private var skips: [NSButton] = []
     private var snoozes: [NSButton] = []
+    /// One per window, holding everything that fades.
+    private var faders: [NSView] = []
+    private var shownAt = Date()
+    private var wakeUntil: Date?
+    private var remainingMs: Int64 = 0
+    private var mouseMonitor: Any?
+
+    private static let quietAfter: TimeInterval = 8
+    private static let wakeFor: TimeInterval = 5
+    private static let loudUnderMs: Int64 = 3 * 60_000
+    private static let quietAlpha: CGFloat = 0.05
 
     /// `snoozable` adds "5 more minutes", which scheduled pauses offer.
     func show(message: String, remainingMs: Int64, snoozable: Bool = false) {
         layout()
+        let wasHidden = !(windows.first?.isVisible ?? false)
+        if wasHidden {
+            shownAt = Date()
+            wakeUntil = nil
+            for fader in faders { fader.alphaValue = 1 }
+        }
         apply(message: message, remainingMs: remainingMs)
         for button in snoozes {
             button.isHidden = !snoozable
         }
         for window in windows {
             window.orderFrontRegardless()
+        }
+        if mouseMonitor == nil {
+            mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .keyDown]) { [weak self] event in
+                self?.wake()
+                return event
+            }
         }
         // The overlay covers the menu bar, so it must take keys for Esc to reach the skip button.
         NSApp.activate(ignoringOtherApps: true)
@@ -42,6 +69,31 @@ final class BreakOverlay: NSObject {
         for window in windows {
             window.orderOut(nil)
         }
+        if let mouseMonitor {
+            NSEvent.removeMonitor(mouseMonitor)
+            self.mouseMonitor = nil
+        }
+    }
+
+    private func wake() {
+        wakeUntil = Date().addingTimeInterval(Self.wakeFor)
+        fade()
+    }
+
+    /// Loud at the start, near the end, and just after the mouse moved. Quiet otherwise.
+    private func fade() {
+        let now = Date()
+        let loud = remainingMs <= Self.loudUnderMs
+            || now.timeIntervalSince(shownAt) < Self.quietAfter
+            || (wakeUntil.map { now < $0 } ?? false)
+        let target: CGFloat = loud ? 1 : Self.quietAlpha
+        guard let current = faders.first?.alphaValue, abs(current - target) > 0.01 else { return }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = loud ? 0.3 : 2
+            for fader in faders {
+                fader.animator().alphaValue = target
+            }
+        }
     }
 
     private func layout() {
@@ -55,6 +107,7 @@ final class BreakOverlay: NSObject {
         countdowns = []
         skips = []
         snoozes = []
+        faders = []
         for screen in screens {
             let window = OverlayWindow(
                 contentRect: screen.frame,
@@ -71,6 +124,7 @@ final class BreakOverlay: NSObject {
             window.hidesOnDeactivate = false
             window.isReleasedWhenClosed = false
             window.ignoresMouseEvents = false
+            window.acceptsMouseMovedEvents = true
 
             let message = label(size: 40, weight: .semibold)
             let countdown = label(size: 96, weight: .medium)
@@ -78,11 +132,16 @@ final class BreakOverlay: NSObject {
             let skip = skipButton()
             let snooze = snoozeButton()
             let content = NSView(frame: NSRect(origin: .zero, size: screen.frame.size))
-            content.addSubview(message)
-            content.addSubview(countdown)
-            content.addSubview(skip)
-            content.addSubview(snooze)
+            let fader = NSView(frame: content.bounds)
+            fader.wantsLayer = true
+            fader.autoresizingMask = [.width, .height]
+            fader.addSubview(message)
+            fader.addSubview(countdown)
+            fader.addSubview(skip)
+            fader.addSubview(snooze)
+            content.addSubview(fader)
             window.contentView = content
+            faders.append(fader)
             place(message: message, countdown: countdown, in: content.bounds.size)
             skip.frame = NSRect(x: (content.bounds.width - 220) / 2, y: 56, width: 220, height: 32)
             snooze.frame = NSRect(x: (content.bounds.width - 220) / 2, y: 100, width: 220, height: 36)
@@ -127,6 +186,8 @@ final class BreakOverlay: NSObject {
     }
 
     private func apply(message: String?, remainingMs: Int64) {
+        self.remainingMs = remainingMs
+        fade()
         let time = formatCountdown(remainingMs)
         for field in countdowns {
             field.stringValue = time

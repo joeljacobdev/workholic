@@ -1,10 +1,9 @@
 import AppKit
 import ServiceManagement
-import UserNotifications
 import WorkholicCore
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotificationCenterDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private var model: AppModel!
 
@@ -21,77 +20,101 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         statusItem.button?.imagePosition = .imageLeading
         statusItem.button?.setAccessibilityLabel("Workholic")
         showStatus(badge: nil, fraction: nil)
-        UNUserNotificationCenter.current().delegate = self
+        NSApp.mainMenu = mainMenu()
         model.onChange = { [weak self] in self?.rebuildMenu() }
-        registerAtLogin()
+        LoginItem.registerOnFirstLaunch()
         model.start()
         rebuildMenu()
+    }
+
+    /// Clicking the app in Finder or the Dock while it runs opens the dashboard.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        if !hasVisibleWindows { model.openWindow(tab: "today") }
+        return true
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         model?.stop()
     }
 
+    /// Two or three lines of state, then Dashboard, Breaks, Settings, and the account.
+    /// Everything else lives in the app window, which is the same page as the web app.
     private func rebuildMenu() {
         let menu = NSMenu()
-        menu.delegate = self
         for line in model.menuLines() {
             let item = NSMenuItem(title: line, action: nil, keyEquivalent: "")
             item.isEnabled = false
             menu.addItem(item)
         }
         menu.addItem(.separator())
-        menu.addItem(item("Open Dashboard…", #selector(openDashboard)))
-        menu.addItem(modeItem("Breaks", #selector(toggleBreaks), on: model.breaksEnabled))
-        menu.addItem(item("Break settings…", #selector(editBreaks)))
-        if model.canTakeBreak {
-            let take = NSMenuItem(title: "Take a break now", action: nil, keyEquivalent: "")
-            let lengths = NSMenu()
-            for minutes in [5, 10, 15, 30] {
-                let length = item("\(minutes) minutes", #selector(takeBreak(_:)))
-                length.tag = minutes
-                lengths.addItem(length)
-            }
-            take.submenu = lengths
-            menu.addItem(take)
+        menu.addItem(item("Dashboard…", #selector(openDashboard)))
+        let breaks = NSMenuItem(title: "Breaks", action: nil, keyEquivalent: "")
+        breaks.submenu = breaksMenu()
+        menu.addItem(breaks)
+        menu.addItem(item("Settings…", #selector(openSettings), key: ","))
+        menu.addItem(.separator())
+        if model.signedIn {
+            menu.addItem(item("Log Out", #selector(logOut)))
+        } else {
+            menu.addItem(item("Log In…", #selector(logIn)))
         }
+        menu.addItem(item("Quit Workholic", #selector(quit), key: "q"))
+        statusItem.menu = menu
+        showStatus(badge: model.statusBadge, fraction: model.usageFraction)
+    }
+
+    private func breaksMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.addItem(modeItem("Breaks on", #selector(toggleBreaks), on: model.breaksEnabled))
+        let take = NSMenuItem(title: "Take a break now", action: nil, keyEquivalent: "")
+        let lengths = NSMenu()
+        for minutes in [5, 10, 15, 30] {
+            let length = item("\(minutes) minutes", #selector(takeBreak(_:)))
+            length.tag = minutes
+            length.isEnabled = model.canTakeBreak
+            lengths.addItem(length)
+        }
+        lengths.autoenablesItems = false
+        take.submenu = lengths
+        menu.addItem(take)
         if model.isPaused {
             menu.addItem(item("Unpause", #selector(unpause)))
         } else {
             menu.addItem(item("Pause (keep awake, not counted)", #selector(pause)))
         }
-        if model.sessionActive {
-            menu.addItem(item("Stop session", #selector(stopSession)))
-        } else {
-            menu.addItem(item("Start a 25 min session", #selector(startShortSession)))
-            menu.addItem(item("Start a 50 min session", #selector(startLongSession)))
-            if let rest = model.restOfTodayMs() {
-                menu.addItem(item("Start a session for the rest of today (\(formatDuration(rest)))", #selector(startRestSession)))
-            }
+        if !model.signedIn {
+            // Logged out there is no account page, so breaks are edited here.
+            menu.addItem(.separator())
+            menu.addItem(item("Break settings…", #selector(editBreaks)))
         }
-        menu.addItem(.separator())
-        menu.addItem(modeItem("Fixed mode", #selector(useFixedBudget), on: !model.usesTasks))
-        menu.addItem(modeItem("Dynamic mode", #selector(useDynamicBudget), on: model.usesTasks))
-        if model.usesTasks {
-            let title = model.hasTodayPlan ? "Edit today’s tasks…" : "Plan today…"
-            menu.addItem(item(title, #selector(planToday)))
-        }
-        if model.signedIn {
-            if !model.usesTasks {
-                menu.addItem(item("Set limit…", #selector(setLimit)))
-            }
-            menu.addItem(item("Log Out", #selector(logOut)))
-        } else {
-            menu.addItem(item("Log In…", #selector(logIn)))
-        }
-        menu.addItem(item("Quit", #selector(quit)))
-        statusItem.menu = menu
-        showStatus(badge: model.statusBadge, fraction: model.usageFraction)
+        return menu
     }
 
-    func menuWillOpen(_ menu: NSMenu) {
-        model.acknowledgeBanner()
-        showStatus(badge: nil, fraction: model.usageFraction)
+    /// Without a main menu, copy, paste, and close do nothing in the app's windows.
+    private func mainMenu() -> NSMenu {
+        let main = NSMenu()
+        let app = NSMenu()
+        app.addItem(item("Settings…", #selector(openSettings), key: ","))
+        app.addItem(.separator())
+        app.addItem(withTitle: "Hide Workholic", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        app.addItem(item("Quit Workholic", #selector(quit), key: "q"))
+        let edit = NSMenu(title: "Edit")
+        edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        edit.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        edit.addItem(.separator())
+        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        let window = NSMenu(title: "Window")
+        window.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        window.addItem(withTitle: "Minimize", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        for (title, submenu) in [("Workholic", app), ("Edit", edit), ("Window", window)] {
+            let holder = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            holder.submenu = submenu
+            main.addItem(holder)
+        }
+        return main
     }
 
     private func showStatus(badge: String?, fraction: Double?) {
@@ -105,15 +128,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         }
     }
 
-    nonisolated func userNotificationCenter(
-        _ center: UNUserNotificationCenter,
-        willPresent notification: UNNotification
-    ) async -> UNNotificationPresentationOptions {
-        [.banner, .sound]
-    }
-
-    private func item(_ title: String, _ action: Selector) -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+    private func item(_ title: String, _ action: Selector, key: String = "") -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
         item.target = self
         return item
     }
@@ -126,20 +142,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
     @objc private func logIn() { model.promptLogin() }
     @objc private func logOut() { model.logout() }
-    @objc private func setLimit() { model.promptLimit() }
-    @objc private func useFixedBudget() { model.useFixedBudget() }
-    @objc private func useDynamicBudget() { model.useDynamicBudget() }
-    @objc private func planToday() { model.editDayPlan() }
     @objc private func quit() { NSApp.terminate(nil) }
-    @objc private func openDashboard() { NSWorkspace.shared.open(ApiOrigin.baseURL) }
-
-    @objc private func startShortSession() { model.startSession(budgetMs: SessionBudget.shortMs) }
-    @objc private func startLongSession() { model.startSession(budgetMs: SessionBudget.longMs) }
-    @objc private func startRestSession() {
-        guard let rest = model.restOfTodayMs() else { return }
-        model.startSession(budgetMs: rest)
-    }
-    @objc private func stopSession() { model.stopSession() }
+    @objc private func openDashboard() { model.openWindow(tab: "today") }
+    @objc private func openSettings() { model.openWindow(tab: "settings") }
     @objc private func editBreaks() { model.editBreaks() }
     @objc private func toggleBreaks() { model.toggleBreaks() }
     @objc private func pause() { model.pause() }
@@ -183,11 +188,34 @@ func statusIcon(fraction: Double?) -> NSImage {
     return image
 }
 
-private func registerAtLogin() {
-    let path = Bundle.main.bundlePath
-    guard path.contains("/Applications/") else { return }
-    guard SMAppService.mainApp.status == .notRegistered else { return }
-    try? SMAppService.mainApp.register()
+/// Open at login, switched from Settings. The first launch from an Applications folder turns it on
+/// once; after that only the switch changes it, so turning it off stays off.
+@MainActor
+enum LoginItem {
+    private static let chosenKey = "loginItemChosen"
+
+    static var isOn: Bool { SMAppService.mainApp.status == .enabled }
+
+    /// Registered, but macOS wants the user to allow it in System Settings › Login Items.
+    static var needsApproval: Bool { SMAppService.mainApp.status == .requiresApproval }
+
+    static func set(_ on: Bool) {
+        UserDefaults.standard.set(true, forKey: chosenKey)
+        do {
+            if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+        } catch {
+            NSLog("Workholic could not change open at login: \(error)")
+        }
+        if on && needsApproval { SMAppService.openSystemSettingsLoginItems() }
+    }
+
+    static func registerOnFirstLaunch() {
+        guard !UserDefaults.standard.bool(forKey: chosenKey) else { return }
+        guard Bundle.main.bundlePath.contains("/Applications/") else { return }
+        UserDefaults.standard.set(true, forKey: chosenKey)
+        guard SMAppService.mainApp.status == .notRegistered else { return }
+        try? SMAppService.mainApp.register()
+    }
 }
 
 func appVersion() -> String {

@@ -219,6 +219,8 @@ try {
   assert.equal(merged.body.every_minutes, 40);
   assert.deepEqual(merged.body.overtime, overtime, "an old-shape save keeps the newer kinds");
   assert.equal(merged.body.scheduled[0].at, "13:00");
+  const pulse = await request("/v1/settings", { token: device });
+  assert.equal(pulse.body.breaks_updated_at_ms, merged.body.updated_at_ms, "settings says when breaks last changed");
 
   const page = await fetch(`${base}/`);
   assert.equal(page.status, 200);
@@ -231,6 +233,7 @@ try {
 
   const ownLimit = await request("/v1/limits", { method: "POST", token: session, body: { limit_ms: 6 * 60 * 60 * 1000 } });
   assert.equal(ownLimit.status, 200);
+  assert.equal((await request("/v1/settings", { token: device })).body.limit_ms, 6 * 60 * 60 * 1000, "settings carries the limit in force");
 
   // Kiritimati is UTC+14, so the 17:00 UTC interval moves from Oct 4 to Oct 5.
   const zoned = await request("/v1/admin/timezone", {

@@ -34,6 +34,21 @@ test("the same device overlapping itself is not counted twice", () => {
   assert.equal(credit.devices[0]?.rawMs, 120);
 });
 
+test("another device's time during one Mac's break still counts", () => {
+  // The laptop is behind a break from 100 to 400, so it uploads nothing there. The desktop is in use.
+  const credit = creditDay(
+    [
+      row({ deviceId: "laptop", startMs: 0, endMs: 100, inputMs: 90 }),
+      row({ deviceId: "desktop", startMs: 150, endMs: 350, inputMs: 340 }),
+      row({ deviceId: "laptop", startMs: 400, endMs: 500, inputMs: 490 }),
+    ],
+    dayStart,
+    dayEnd,
+  );
+  assert.equal(credit.creditedMs, 400);
+  assert.equal(credit.devices.find((device) => device.deviceId === "desktop")?.creditedMs, 200);
+});
+
 test("later real input wins an overlap", () => {
   const credit = creditDay(
     [
