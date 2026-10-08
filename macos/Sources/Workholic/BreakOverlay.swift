@@ -9,6 +9,8 @@ import AppKit
 final class BreakOverlay: NSObject {
     var onSkip: (() -> Void)?
     var onSnooze: (() -> Void)?
+    /// Turned down while the words are faded, and back up whenever they show.
+    var backlight: Backlight?
     private var windows: [NSWindow] = []
     private var messages: [NSTextField] = []
     private var countdowns: [NSTextField] = []
@@ -73,6 +75,7 @@ final class BreakOverlay: NSObject {
             NSEvent.removeMonitor(mouseMonitor)
             self.mouseMonitor = nil
         }
+        backlight?.restore()
     }
 
     private func wake() {
@@ -86,6 +89,7 @@ final class BreakOverlay: NSObject {
         let loud = remainingMs <= Self.loudUnderMs
             || now.timeIntervalSince(shownAt) < Self.quietAfter
             || (wakeUntil.map { now < $0 } ?? false)
+        if loud { backlight?.restore() } else { backlight?.dim() }
         let target: CGFloat = loud ? 1 : Self.quietAlpha
         guard let current = faders.first?.alphaValue, abs(current - target) > 0.01 else { return }
         NSAnimationContext.runAnimationGroup { context in

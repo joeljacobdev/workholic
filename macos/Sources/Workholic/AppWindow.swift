@@ -14,6 +14,8 @@ final class AppWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler, WKNav
         case logOut
         /// The page saved something the Mac reads, such as breaks or the limit.
         case saved
+        /// Unpausing asks for this Mac's password.
+        case pauseLocks(Bool)
     }
 
     var onRequest: ((Request) -> Void)?
@@ -106,6 +108,7 @@ final class AppWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler, WKNav
         case "planToday": request = .planToday
         case "logOut": request = .logOut
         case "saved": request = .saved
+        case "pauseLocks": request = .pauseLocks(value as? Bool ?? false)
         default: return
         }
         onRequest?(request)

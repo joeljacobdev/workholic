@@ -4,25 +4,48 @@ import QuartzCore
 /// A black cover on every display while the user is away and an agent works.
 /// It is built to cost little: no per-second timer, dim text, and one slow dot
 /// that the window server animates at a low frame rate without waking the app.
+/// The backlight goes down with it.
+///
+/// Locked, it also blocks app switching, Force Quit, and logging out while it is up, and the
+/// buttons ask for the Mac's password first. Programs keep running and the Mac stays awake.
+/// It is a lock against someone at the keyboard, not against someone who can kill the app.
 @MainActor
 final class PauseOverlay: NSObject {
     var onUnpause: (() -> Void)?
     var onPeek: (() -> Void)?
+    var backlight: Backlight?
     private var windows: [NSWindow] = []
     private var elapsedLabels: [NSTextField] = []
+    private var notes: [NSTextField] = []
     private var dots: [CALayer] = []
     private var minuteTimer: Timer?
     private var since = Date()
+    private var locked = false
+
+    private static let kiosk: NSApplication.PresentationOptions = [
+        .hideDock, .hideMenuBar, .disableAppleMenu, .disableProcessSwitching,
+        .disableForceQuit, .disableSessionTermination, .disableHideApplication,
+    ]
 
     var isVisible: Bool { windows.contains { $0.isVisible } }
 
-    func show(since: Date) {
+    func show(since: Date, locked: Bool) {
         self.since = since
+        self.locked = locked
         layout()
         refreshElapsed()
+        let note = locked
+            ? "Locked. Your Mac stays awake and this time is not counted. Unpausing asks for your Mac password."
+            : "Your Mac stays awake. This time is not counted."
+        for field in notes {
+            field.stringValue = note
+        }
         for window in windows {
+            window.level = .screenSaver
             window.orderFrontRegardless()
         }
+        backlight?.dim()
+        if locked { NSApp.presentationOptions = Self.kiosk }
         for dot in dots {
             breathe(dot)
         }
@@ -46,6 +69,16 @@ final class PauseOverlay: NSObject {
         for window in windows {
             window.orderOut(nil)
         }
+        backlight?.restore()
+        if locked { NSApp.presentationOptions = [] }
+    }
+
+    /// While the password prompt is up, the cover steps below it and the screen brightens to read it.
+    func makeRoomForPrompt(_ prompting: Bool) {
+        for window in windows {
+            window.level = prompting ? .normal : .screenSaver
+        }
+        if prompting { backlight?.restore() } else { backlight?.dim() }
     }
 
     @objc private func unpause() {
@@ -83,6 +116,7 @@ final class PauseOverlay: NSObject {
         hide()
         windows = []
         elapsedLabels = []
+        notes = []
         dots = []
         for screen in screens {
             let window = OverlayWindow(
@@ -114,8 +148,9 @@ final class PauseOverlay: NSObject {
 
             let title = label("Paused", size: 30, white: 0.5, weight: .medium)
             title.frame = NSRect(x: 0, y: size.height / 2 + 16, width: size.width, height: 40)
-            let note = label("Your Mac stays awake. This time is not counted.", size: 15, white: 0.32, weight: .regular)
+            let note = label("", size: 15, white: 0.32, weight: .regular)
             note.frame = NSRect(x: 0, y: size.height / 2 - 14, width: size.width, height: 22)
+            notes.append(note)
             let elapsed = label("", size: 14, white: 0.28, weight: .regular)
             elapsed.font = NSFont.monospacedDigitSystemFont(ofSize: 14, weight: .regular)
             elapsed.frame = NSRect(x: 0, y: size.height / 2 - 40, width: size.width, height: 20)

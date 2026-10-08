@@ -27,6 +27,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         rebuildMenu()
     }
 
+    /// A locked pause cover stays up: quitting would be a way around the password.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        model.blocksQuit ? .terminateCancel : .terminateNow
+    }
+
     /// Clicking the app in Finder or the Dock while it runs opens the dashboard.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
         if !hasVisibleWindows { model.openWindow(tab: "today") }
@@ -80,7 +85,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if model.isPaused {
             menu.addItem(item("Unpause", #selector(unpause)))
         } else {
-            menu.addItem(item("Pause (keep awake, not counted)", #selector(pause)))
+            let title = model.pauseLocks ? "Pause and lock (keep awake, not counted)" : "Pause (keep awake, not counted)"
+            menu.addItem(item(title, #selector(pause)))
         }
         if !model.signedIn {
             // Logged out there is no account page, so breaks are edited here.
@@ -96,7 +102,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let app = NSMenu()
         app.addItem(item("Settings…", #selector(openSettings), key: ","))
         app.addItem(.separator())
-        app.addItem(withTitle: "Hide Workholic", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        app.addItem(item("Hide Workholic", #selector(hideApp), key: "h"))
         app.addItem(item("Quit Workholic", #selector(quit), key: "q"))
         let edit = NSMenu(title: "Edit")
         edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
@@ -143,6 +149,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func logIn() { model.promptLogin() }
     @objc private func logOut() { model.logout() }
     @objc private func quit() { NSApp.terminate(nil) }
+    /// Hiding would take a locked pause cover down with the app's windows.
+    @objc private func hideApp() {
+        if !model.blocksQuit { NSApp.hide(nil) }
+    }
     @objc private func openDashboard() { model.openWindow(tab: "today") }
     @objc private func openSettings() { model.openWindow(tab: "settings") }
     @objc private func editBreaks() { model.editBreaks() }

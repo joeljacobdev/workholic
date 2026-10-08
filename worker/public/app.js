@@ -875,6 +875,7 @@ function renderMac(state) {
   $("mac-panel").hidden = false;
   $("mac-login").checked = Boolean(state.openAtLogin);
   $("mac-login-note").hidden = !state.openAtLoginNeedsApproval;
+  $("mac-lock").checked = Boolean(state.pauseLocks);
   const dynamic = state.budgetMode === "dynamic";
   $("mac-mode-fixed").checked = !dynamic;
   $("mac-mode-dynamic").checked = dynamic;
@@ -887,6 +888,7 @@ if (macBridge) {
   window.workholicMac = { update: renderMac };
   $("logout").textContent = "Log out of this Mac";
   $("mac-login").addEventListener("change", (event) => tellMac("openAtLogin", event.target.checked));
+  $("mac-lock").addEventListener("change", (event) => tellMac("pauseLocks", event.target.checked));
   for (const radio of document.querySelectorAll('input[name="mac-mode"]')) {
     radio.addEventListener("change", (event) => tellMac("budgetMode", event.target.value));
   }

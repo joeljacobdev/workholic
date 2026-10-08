@@ -27,6 +27,16 @@ The screen stays black and stays on. The display is kept from sleeping for the l
 
 The message and the countdown show for a few seconds, then fade almost to nothing. A clock counting down a 20-minute break is something to watch, which defeats the purpose. They come back for the last 3 minutes, and for a few seconds whenever you move the mouse or press a key, so Skip and "5 more minutes" are always easy to find.
 
+A black window still leaves the panel lit, so the backlight goes down too while the words are faded, and comes back with them. This uses DisplayServices, the private framework behind the brightness keys. It reaches built-in and Apple displays; other monitors only get the black cover. The level before dimming is saved, so a crash mid-break is undone at the next launch.
+
+## Pause, and locking it
+
+Pause is for stepping away while something keeps working, such as an agent. The Mac stays awake, programs keep running, nothing is counted, and the screen is black with the backlight down.
+
+"Lock the Pause screen with this Mac's password" (This Mac, in Settings) makes Unpause and "Unpause for 5 minutes" ask for the Mac password or Touch ID first. While the locked cover is up, app switching, Force Quit, Hide, Quit, and logging out are blocked.
+
+It is not the macOS lock screen. That screen cannot show Workholic's cover, and it brings the display's own sleep timers with it. The price is that this lock only guards the keyboard. Someone who can end the app another way, such as over SSH, gets past it. Holding the power button still restarts the Mac if anything ever goes wrong.
+
 ## Settings are one copy, the latest save wins
 
 Break settings and the daily limit live in the account. An edit on a Mac goes up at once. Every Mac, and the web Settings page while it is open, asks every 10 seconds whether anything changed. That check is one small request (`GET /v1/settings` returns the limit and when breaks last changed). The full break list is fetched only when that time moves.
