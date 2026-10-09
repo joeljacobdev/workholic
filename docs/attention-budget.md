@@ -151,7 +151,7 @@ Pass 1 closed what public docs and source can close. Pass 2 was not run. These i
 | `max_stats_range_days` | 400 | `GET /v1/stats`. |
 | `clock_warn_ms` | 120000 | UI warning only. Durations are not rewritten. |
 | `max_clock_offset_ms` | 900000 | Server. `abs(clock_offset_ms)` above this is `422 clock_offset` and writes nothing. The collector drops slices sealed outside this cap on that `422` and does not upload those interval ids after the clock is fixed. |
-| `session_ttl_ms` | 2592000000 | Web session, absolute, 30 days. |
+| `session_ttl_ms` | 2592000000 | Web session, 30 days from last use. Use renews it at most once a day. |
 
 ### System context
 
@@ -756,7 +756,7 @@ Header `X-Bootstrap-Token`. Body `{ "timezone": "America/Los_Angeles" }`. Create
 Bootstrap token. Revokes the previous owner token hash, returns a new owner token, does not delete devices or intervals.
 
 **`POST /v1/sessions`**
-Owner bearer. Returns `{ "session_token", "expires_at_ms" }` and sets the cookie. Absolute 30-day expiry.
+Owner bearer. Returns `{ "session_token", "expires_at_ms" }` and sets the cookie. Expires 30 days after last use; any authenticated request more than a day after the last renewal pushes it out again.
 
 **`DELETE /v1/sessions/current`**
 Session. Sets `revoked_at_ms`.

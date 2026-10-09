@@ -9,7 +9,10 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const APP_KEY = /^[A-Za-z0-9._-]{1,200}$/;
 const MAX_DURATION_MS = 305_000;
 const MAX_CLOCK_OFFSET_MS = 900_000;
-const SESSION_MS = 30 * 24 * 60 * 60 * 1000;
+// A session lasts 30 days from its last use, not from login. Use pushes the expiry out
+// at most once a day, so a busy client does not write on every request.
+export const SESSION_MS = 30 * 24 * 60 * 60 * 1000;
+export const SESSION_RENEW_AFTER_MS = 24 * 60 * 60 * 1000;
 
 export interface IntervalInput {
   interval_id: string;
@@ -462,6 +465,15 @@ export class UserAccount extends DurableObject<Env> {
       input.now,
       await sha256Hex(input.token),
     );
+  }
+
+  /** Pushes a live session's expiry to 30 days from now. Nil when the session is gone. */
+  async renewSession(input: { token: string; now: number }): Promise<number | null> {
+    const session = await this.sessionFor(input.token, input.now);
+    if (!session) return null;
+    const expiresAtMs = input.now + SESSION_MS;
+    this.ctx.storage.sql.exec("UPDATE session SET expires_at_ms = ? WHERE session_id = ?", expiresAtMs, session.session_id);
+    return expiresAtMs;
   }
 
   private requireUser(): { user_id: string; username: string; timezone: string; idle_threshold_ms: number } {

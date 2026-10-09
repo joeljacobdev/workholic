@@ -94,8 +94,18 @@ struct UploadAck: Decodable {
 }
 
 enum ApiError: Error, CustomStringConvertible {
-    case message(String)
-    var description: String { switch self { case .message(let text): return text } }
+    /// A non-2xx answer from the server, with its body or "HTTP <status>".
+    case http(status: Int, text: String)
+    var description: String {
+        switch self { case .http(_, let text): return text }
+    }
+
+    /// True only when the server itself said the token is no good. Network errors never are:
+    /// their text carries random task ids that can contain "401" by chance.
+    static func isSignedOut(_ error: Error) -> Bool {
+        if case .http(let status, _)? = error as? ApiError { return status == 401 }
+        return false
+    }
 }
 
 struct ApiClient {
@@ -167,7 +177,7 @@ struct ApiClient {
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         if !(200..<300).contains(status) {
             let text = String(data: data, encoding: .utf8) ?? ""
-            throw ApiError.message(text.isEmpty ? "HTTP \(status)" : text)
+            throw ApiError.http(status: status, text: text.isEmpty ? "HTTP \(status)" : text)
         }
         return try JSONDecoder().decode(Response.self, from: data)
     }

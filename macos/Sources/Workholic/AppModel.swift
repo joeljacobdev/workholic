@@ -482,8 +482,7 @@ final class AppModel {
             }
             onChange?()
         } catch {
-            let text = String(describing: error)
-            if text.contains("bad_token") || text.contains("401") { logout() }
+            if ApiError.isSignedOut(error) { logout() }
             // Anything else is a missed check. The next one is seconds away.
         }
     }
@@ -738,9 +737,8 @@ final class AppModel {
             do {
                 try await syncBreaks(api: api, session: session)
             } catch {
-                let text = String(describing: error)
-                if text.contains("bad_token") || text.contains("401") { throw error }
-                breakNote = "Break settings did not sync. \(text)"
+                if ApiError.isSignedOut(error) { throw error }
+                breakNote = "Break settings did not sync. \(error)"
             }
             if let device = TokenStore.get("device") {
                 try await upload(api: api, deviceToken: device)
@@ -752,11 +750,10 @@ final class AppModel {
             }
             problem = breakNote
         } catch {
-            let text = String(describing: error)
-            if text.contains("bad_token") || text.contains("401") {
+            if ApiError.isSignedOut(error) {
                 logout()
             } else {
-                problem = "Not syncing. Today may be missing other devices. \(text)"
+                problem = "Not syncing. Today may be missing other devices. \(error)"
             }
         }
         onChange?()

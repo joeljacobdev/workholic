@@ -2,7 +2,7 @@ import { parseBreakSettings } from "./breaks";
 import { isValidTimeZone } from "./day";
 import { Directory, normalizeUsername, passwordAccepted } from "./directory";
 import { sameSecret, sha256Hex } from "./password";
-import { UserAccount, type IntervalInput } from "./user-account";
+import { SESSION_MS, SESSION_RENEW_AFTER_MS, UserAccount, type IntervalInput } from "./user-account";
 
 export { Directory, UserAccount };
 
@@ -348,7 +348,17 @@ async function uploadIntervals(request: Request, env: Env, deviceId: string): Pr
   return json(body, status);
 }
 
+// A login session in use stays signed in: once a day of its 30 has passed, its expiry moves
+// out to 30 days from now. Device tokens do not expire.
 async function userIdForToken(env: Env, token: string): Promise<string | null> {
-  const found = await directory(env).findToken({ tokenHash: await sha256Hex(token), now: Date.now() });
-  return found?.userId ?? null;
+  const tokenHash = await sha256Hex(token);
+  const now = Date.now();
+  const found = await directory(env).findToken({ tokenHash, now });
+  if (!found) return null;
+  if (found.kind === "session" && found.expiresAtMs !== null && found.expiresAtMs - now < SESSION_MS - SESSION_RENEW_AFTER_MS) {
+    const expiresAtMs = await account(env, found.userId).renewSession({ token, now });
+    if (expiresAtMs === null) return null;
+    await directory(env).extendSession({ tokenHash, expiresAtMs });
+  }
+  return found.userId;
 }

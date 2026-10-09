@@ -129,12 +129,16 @@ export class Directory extends DurableObject<Env> {
     );
   }
 
-  async findToken(input: { tokenHash: string; now: number }): Promise<{ userId: string } | null> {
+  async findToken(input: { tokenHash: string; now: number }): Promise<{ userId: string; kind: string; expiresAtMs: number | null } | null> {
     const row = this.ctx.storage.sql
-      .exec<{ user_id: string; expires_at_ms: number | null }>("SELECT user_id, expires_at_ms FROM token WHERE token_hash = ?", input.tokenHash)
+      .exec<{ user_id: string; kind: string; expires_at_ms: number | null }>("SELECT user_id, kind, expires_at_ms FROM token WHERE token_hash = ?", input.tokenHash)
       .toArray()[0];
     if (!row) return null;
     if (row.expires_at_ms !== null && row.expires_at_ms <= input.now) return null;
-    return { userId: row.user_id };
+    return { userId: row.user_id, kind: row.kind, expiresAtMs: row.expires_at_ms };
+  }
+
+  async extendSession(input: { tokenHash: string; expiresAtMs: number }): Promise<void> {
+    this.ctx.storage.sql.exec("UPDATE token SET expires_at_ms = ? WHERE token_hash = ? AND kind = 'session'", input.expiresAtMs, input.tokenHash);
   }
 }
