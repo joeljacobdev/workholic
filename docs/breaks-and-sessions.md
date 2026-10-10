@@ -25,9 +25,11 @@ Stepping away for 5 minutes, turning the screen off, or sleeping the Mac also en
 
 The screen stays black and stays on. The display is kept from sleeping for the length of the break. A dark screen asks you to step away; a sleeping one looks like nothing happened.
 
-The message and the countdown show for a few seconds, then fade almost to nothing. A clock counting down a 20-minute break is something to watch, which defeats the purpose. They come back for the last 3 minutes, and for a few seconds whenever you move the mouse or press a key, so Skip and "5 more minutes" are always easy to find.
+The message and the countdown show for a few seconds. Then the countdown and the buttons fade almost to nothing: a clock counting down a 20-minute break is something to watch, which defeats the purpose. The message dims but stays readable, so a dark screen always says it is a break and not a dimmed screen to keep working on. Everything comes back for the last 3 minutes, and for a few seconds whenever you move the mouse or press a key, so Skip and "5 more minutes" are always easy to find.
 
-A black window still leaves the panel lit, so the backlight goes down too while the words are faded, and comes back with them. This uses DisplayServices, the private framework behind the brightness keys. It reaches built-in and Apple displays; other monitors only get the black cover. The level before dimming is saved, so a crash mid-break is undone at the next launch.
+A black window still leaves the panel lit, so the backlight goes down too while the countdown is faded, and comes back with it. This uses DisplayServices, the private framework behind the brightness keys. It reaches built-in and Apple displays; other monitors only get the black cover. The level before dimming is saved, so a crash mid-break is undone at the next launch. The backlight only goes down while the cover is actually on the screen, so a dim screen without the cover cannot happen.
+
+While a break is up, app switching, the Dock, and Hide are blocked; Esc still skips. The cover puts itself back if a display is plugged in or out, the Space changes, or anything takes it down. With the dashboard window open, Workholic is a Dock app, and a Dock app's windows cannot cover another app's full-screen Space. So while a break or pause cover is up, Workholic steps back to a menu bar app, and the Dock icon returns after.
 
 ## Pause, and locking it
 

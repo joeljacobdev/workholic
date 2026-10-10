@@ -199,6 +199,8 @@ final class AppModel {
 
     /// The dashboard or settings window. Logged out, it asks for a login first.
     func openWindow(tab: String) {
+        // It would open behind the cover and put the app back in the Dock, where it cannot cover full-screen apps.
+        guard !coverIsUp else { return }
         guard let token = TokenStore.get("session") else {
             promptLogin { [weak self] in self?.openWindow(tab: tab) }
             return
@@ -366,6 +368,9 @@ final class AppModel {
     /// A locked pause cover is up, so quitting the app must not take it down.
     var blocksQuit: Bool { pauseCovering && pauseLocks }
 
+    /// A break or the pause cover is on the screen. Hiding the app would take it down and leave only the dimmed backlight.
+    var coverIsUp: Bool { covering || pauseCovering }
+
     enum Unlocked: Sendable { case unpause, peek }
 
     private func proceed(_ next: Unlocked) {
@@ -414,6 +419,7 @@ final class AppModel {
     func peek() {
         guard pausedSince != nil, peekTimer == nil else { return }
         pauseOverlay.hide()
+        fitActivationPolicy()
         peekTimer = Timer.scheduledTimer(withTimeInterval: 5 * 60, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.peekTimer = nil
@@ -430,6 +436,7 @@ final class AppModel {
         peekTimer = nil
         pauseOverlay.hide()
         power.release()
+        fitActivationPolicy()
         tick()
     }
 
@@ -441,6 +448,8 @@ final class AppModel {
             reminder = skipBreak(state: reminder)
             endBreak()
         }
+        // pauseCovering is already true here, so this steps out of the Dock before the cover goes up.
+        fitActivationPolicy()
         pauseOverlay.show(since: since, locked: pauseLocks)
         onChange?()
     }
@@ -825,6 +834,7 @@ final class AppModel {
         if !covering { store.seal() }
         covering = true
         breakPower.hold(reason: "A Workholic break is on the screen.")
+        fitActivationPolicy()
         overlay.show(message: active.message, remainingMs: active.remainingMs, snoozable: active.kind != .manual)
         guard countdownTimer == nil else { return }
         lastCountdownAt = Date()
@@ -838,6 +848,15 @@ final class AppModel {
         overlay.hide()
         covering = false
         breakPower.release()
+        fitActivationPolicy()
+    }
+
+    /// With the dashboard open the app is a Dock app, and a Dock app's windows cannot cover
+    /// another app's full-screen Space: the break would only dim the screen. So while a cover
+    /// is up the app is a menu bar app again, and the Dock icon comes back after.
+    private func fitActivationPolicy() {
+        let policy: NSApplication.ActivationPolicy = coverIsUp || !appWindow.isVisible ? .accessory : .regular
+        if NSApp.activationPolicy() != policy { NSApp.setActivationPolicy(policy) }
     }
 
     private func endBreak() {

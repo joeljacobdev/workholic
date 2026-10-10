@@ -21,6 +21,9 @@ final class PauseOverlay: NSObject {
     private var minuteTimer: Timer?
     private var since = Date()
     private var locked = false
+    /// The cover is meant to be on screen: set by `show`, cleared by `hide`.
+    private var up = false
+    private var prompting = false
 
     private static let kiosk: NSApplication.PresentationOptions = [
         .hideDock, .hideMenuBar, .disableAppleMenu, .disableProcessSwitching,
@@ -29,10 +32,26 @@ final class PauseOverlay: NSObject {
 
     var isVisible: Bool { windows.contains { $0.isVisible } }
 
+    /// A display that comes or goes, or a Space change, would otherwise leave part of the screen uncovered.
+    override init() {
+        super.init()
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(screensChanged),
+            name: NSApplication.didChangeScreenParametersNotification, object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(spaceChanged),
+            name: NSWorkspace.activeSpaceDidChangeNotification, object: nil
+        )
+    }
+
     func show(since: Date, locked: Bool) {
         self.since = since
         self.locked = locked
+        up = true
+        prompting = false
         layout()
+        if NSApp.isHidden { NSApp.unhide(nil) }
         refreshElapsed()
         let note = locked
             ? "Locked. Your Mac stays awake and this time is not counted. Unpausing asks for your Mac password."
@@ -69,16 +88,33 @@ final class PauseOverlay: NSObject {
         for window in windows {
             window.orderOut(nil)
         }
+        up = false
+        prompting = false
         backlight?.restore()
         if locked { NSApp.presentationOptions = [] }
     }
 
     /// While the password prompt is up, the cover steps below it and the screen brightens to read it.
     func makeRoomForPrompt(_ prompting: Bool) {
+        self.prompting = prompting
         for window in windows {
             window.level = prompting ? .normal : .screenSaver
         }
         if prompting { backlight?.restore() } else { backlight?.dim() }
+    }
+
+    @objc private func screensChanged() {
+        guard up else { return }
+        let wasPrompting = prompting
+        show(since: since, locked: locked)
+        if wasPrompting { makeRoomForPrompt(true) }
+    }
+
+    @objc private func spaceChanged() {
+        guard up else { return }
+        for window in windows {
+            window.orderFrontRegardless()
+        }
     }
 
     @objc private func unpause() {
@@ -113,7 +149,9 @@ final class PauseOverlay: NSObject {
         if windows.count == screens.count, zip(windows, screens).allSatisfy({ $0.frame.equalTo($1.frame) }) {
             return
         }
-        hide()
+        for window in windows {
+            window.orderOut(nil)
+        }
         windows = []
         elapsedLabels = []
         notes = []

@@ -2,9 +2,13 @@ import AppKit
 
 /// One full-screen window on every display: the user's sentence, a countdown, and a quiet way out.
 ///
-/// The screen stays dark, but the words and the countdown fade out a few seconds in, so a long
-/// break is not a clock to watch. They come back for the last three minutes, and for a few
+/// The screen stays dark. The countdown and the buttons fade out a few seconds in, so a long
+/// break is not a clock to watch; the sentence dims but stays readable, so the dark screen
+/// always says why it is dark. Everything comes back for the last three minutes, and for a few
 /// seconds whenever the mouse moves.
+///
+/// While it is up, app switching, the Dock, and Hide are blocked, and the cover puts itself back
+/// when a display comes or goes or the Space changes. Esc still skips.
 @MainActor
 final class BreakOverlay: NSObject {
     var onSkip: (() -> Void)?
@@ -16,34 +20,60 @@ final class BreakOverlay: NSObject {
     private var countdowns: [NSTextField] = []
     private var skips: [NSButton] = []
     private var snoozes: [NSButton] = []
-    /// One per window, holding everything that fades.
+    /// One per window, holding the countdown and the buttons, which fade almost to nothing.
     private var faders: [NSView] = []
     private var shownAt = Date()
     private var wakeUntil: Date?
     private var remainingMs: Int64 = 0
     private var mouseMonitor: Any?
+    /// The cover is meant to be on screen: set by `show`, cleared by `hide`.
+    private var up = false
+    private var message = ""
+    private var snoozable = false
 
     private static let quietAfter: TimeInterval = 8
     private static let wakeFor: TimeInterval = 5
     private static let loudUnderMs: Int64 = 3 * 60_000
     private static let quietAlpha: CGFloat = 0.05
+    private static let quietMessageAlpha: CGFloat = 0.6
+    /// Dock and menu bar hidden, no Cmd-Tab, no Hide. Process switching needs the Dock hidden.
+    private static let lockdown: NSApplication.PresentationOptions = [
+        .hideDock, .hideMenuBar, .disableProcessSwitching, .disableHideApplication,
+    ]
+
+    override init() {
+        super.init()
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(screensChanged),
+            name: NSApplication.didChangeScreenParametersNotification, object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(spaceChanged),
+            name: NSWorkspace.activeSpaceDidChangeNotification, object: nil
+        )
+    }
 
     /// `snoozable` adds "5 more minutes", which scheduled pauses offer.
     func show(message: String, remainingMs: Int64, snoozable: Bool = false) {
+        up = true
+        self.message = message
+        self.snoozable = snoozable
         layout()
         let wasHidden = !(windows.first?.isVisible ?? false)
         if wasHidden {
             shownAt = Date()
             wakeUntil = nil
-            for fader in faders { fader.alphaValue = 1 }
+            for view in faders + messages { view.alphaValue = 1 }
         }
-        apply(message: message, remainingMs: remainingMs)
         for button in snoozes {
             button.isHidden = !snoozable
         }
+        if NSApp.isHidden { NSApp.unhide(nil) }
         for window in windows {
             window.orderFrontRegardless()
         }
+        NSApp.presentationOptions = Self.lockdown
+        apply(message: message, remainingMs: remainingMs)
         if mouseMonitor == nil {
             mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .keyDown]) { [weak self] event in
                 self?.wake()
@@ -63,10 +93,17 @@ final class BreakOverlay: NSObject {
         onSnooze?()
     }
 
+    /// Runs every second while the break counts down. A cover that something took down goes back up.
     func update(message: String? = nil, remainingMs: Int64) {
+        if up, !fitsScreens || windows.contains(where: { !$0.isVisible }) {
+            show(message: message ?? self.message, remainingMs: remainingMs, snoozable: snoozable)
+            return
+        }
         apply(message: message, remainingMs: remainingMs)
     }
 
+    /// Only a cover that is up gives back the backlight and the presentation options.
+    /// The pause cover uses both, and a break ending under it must not undo them.
     func hide() {
         for window in windows {
             window.orderOut(nil)
@@ -75,7 +112,23 @@ final class BreakOverlay: NSObject {
             NSEvent.removeMonitor(mouseMonitor)
             self.mouseMonitor = nil
         }
+        guard up else { return }
+        up = false
+        NSApp.presentationOptions = []
         backlight?.restore()
+    }
+
+    @objc private func screensChanged() {
+        guard up else { return }
+        show(message: message, remainingMs: remainingMs, snoozable: snoozable)
+    }
+
+    @objc private func spaceChanged() {
+        guard up else { return }
+        for window in windows {
+            window.orderFrontRegardless()
+        }
+        fade()
     }
 
     private func wake() {
@@ -84,28 +137,42 @@ final class BreakOverlay: NSObject {
     }
 
     /// Loud at the start, near the end, and just after the mouse moved. Quiet otherwise.
+    /// The backlight goes down only while the cover is really on the screen being looked at.
     private func fade() {
         let now = Date()
         let loud = remainingMs <= Self.loudUnderMs
             || now.timeIntervalSince(shownAt) < Self.quietAfter
             || (wakeUntil.map { now < $0 } ?? false)
-        if loud { backlight?.restore() } else { backlight?.dim() }
+        let covered = windows.contains { $0.isVisible && $0.isOnActiveSpace }
+        if loud || !covered { backlight?.restore() } else { backlight?.dim() }
         let target: CGFloat = loud ? 1 : Self.quietAlpha
+        let messageTarget: CGFloat = loud ? 1 : Self.quietMessageAlpha
         guard let current = faders.first?.alphaValue, abs(current - target) > 0.01 else { return }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = loud ? 0.3 : 2
             for fader in faders {
                 fader.animator().alphaValue = target
             }
+            for field in messages {
+                field.animator().alphaValue = messageTarget
+            }
         }
     }
 
+    /// The screen frames the windows were built for.
+    private var laidOutFor: [NSRect]?
+
+    private var fitsScreens: Bool {
+        laidOutFor == NSScreen.screens.map(\.frame)
+    }
+
     private func layout() {
-        let screens = NSScreen.screens
-        if windows.count == screens.count, zip(windows, screens).allSatisfy({ $0.frame.equalTo($1.frame) }) {
-            return
+        if fitsScreens { return }
+        for window in windows {
+            window.orderOut(nil)
         }
-        hide()
+        let screens = NSScreen.screens
+        laidOutFor = screens.map(\.frame)
         windows = []
         messages = []
         countdowns = []
@@ -139,11 +206,12 @@ final class BreakOverlay: NSObject {
             let fader = NSView(frame: content.bounds)
             fader.wantsLayer = true
             fader.autoresizingMask = [.width, .height]
-            fader.addSubview(message)
+            message.wantsLayer = true
             fader.addSubview(countdown)
             fader.addSubview(skip)
             fader.addSubview(snooze)
             content.addSubview(fader)
+            content.addSubview(message)
             window.contentView = content
             faders.append(fader)
             place(message: message, countdown: countdown, in: content.bounds.size)

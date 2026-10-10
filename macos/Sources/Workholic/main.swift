@@ -149,9 +149,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func logIn() { model.promptLogin() }
     @objc private func logOut() { model.logout() }
     @objc private func quit() { NSApp.terminate(nil) }
-    /// Hiding would take a locked pause cover down with the app's windows.
+    /// Hiding would take a break or pause cover down with the app's windows, leaving only a dimmed screen.
     @objc private func hideApp() {
-        if !model.blocksQuit { NSApp.hide(nil) }
+        if !model.coverIsUp { NSApp.hide(nil) }
     }
     @objc private func openDashboard() { model.openWindow(tab: "today") }
     @objc private func openSettings() { model.openWindow(tab: "settings") }
