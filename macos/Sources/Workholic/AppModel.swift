@@ -861,6 +861,8 @@ final class AppModel {
 
     private func endBreak() {
         uncover()
+        // Whatever path ended the break, the screen comes back to full brightness unless the pause cover has it.
+        if !pauseCovering { backlight.restore() }
         countdownTimer?.invalidate()
         countdownTimer = nil
         lastCountdownAt = nil

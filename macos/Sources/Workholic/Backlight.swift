@@ -20,6 +20,9 @@ final class Backlight {
     /// Display id to the level it had before dimming. Empty when nothing is dimmed.
     private var saved: [CGDirectDisplayID: Float]
     private var ramp: Timer?
+    /// The levels a restore ramp still on its way up is heading for. A dim that starts mid-ramp
+    /// saves these, not the half-restored level, or the screen would never come all the way back.
+    private var restoring: [CGDirectDisplayID: Float] = [:]
 
     init() {
         let handle = dlopen("/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices", RTLD_NOW)
@@ -43,9 +46,11 @@ final class Backlight {
         for display in onlineDisplays() {
             var level: Float = -1
             guard get(display, &level) == 0, level >= 0 else { continue }
-            saved[display] = level
-            targets[display] = (level, min(level, Self.dimLevel))
+            let before = restoring[display] ?? level
+            saved[display] = before
+            targets[display] = (level, min(before, Self.dimLevel))
         }
+        restoring = [:]
         persist()
         animate(targets)
     }
@@ -60,14 +65,23 @@ final class Backlight {
         }
         saved = [:]
         persist()
-        if animated { animate(targets) } else { apply(targets, fraction: 1) }
+        if animated {
+            restoring = targets.mapValues(\.to)
+            animate(targets)
+        } else {
+            ramp?.invalidate()
+            ramp = nil
+            restoring = [:]
+            apply(targets, fraction: 1)
+        }
     }
 
+    /// The ramp runs in the common run loop mode, so an open menu does not stall it halfway.
     private func animate(_ targets: [CGDirectDisplayID: (from: Float, to: Float)]) {
         ramp?.invalidate()
         let start = Date()
         let duration = Double(Self.steps) * Self.stepSeconds
-        ramp = Timer.scheduledTimer(withTimeInterval: Self.stepSeconds, repeats: true) { [weak self] _ in
+        let timer = Timer(timeInterval: Self.stepSeconds, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
                 let fraction = Float(min(1, Date().timeIntervalSince(start) / duration))
@@ -75,9 +89,12 @@ final class Backlight {
                 if fraction >= 1 {
                     self.ramp?.invalidate()
                     self.ramp = nil
+                    self.restoring = [:]
                 }
             }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        ramp = timer
     }
 
     private func apply(_ targets: [CGDirectDisplayID: (from: Float, to: Float)], fraction: Float) {

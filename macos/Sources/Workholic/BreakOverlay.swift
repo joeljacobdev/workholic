@@ -25,7 +25,7 @@ final class BreakOverlay: NSObject {
     private var shownAt = Date()
     private var wakeUntil: Date?
     private var remainingMs: Int64 = 0
-    private var mouseMonitor: Any?
+    private let input = InputWatcher()
     /// The cover is meant to be on screen: set by `show`, cleared by `hide`.
     private var up = false
     private var message = ""
@@ -74,12 +74,7 @@ final class BreakOverlay: NSObject {
         }
         NSApp.presentationOptions = Self.lockdown
         apply(message: message, remainingMs: remainingMs)
-        if mouseMonitor == nil {
-            mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .keyDown]) { [weak self] event in
-                self?.wake()
-                return event
-            }
-        }
+        input.start { [weak self] in self?.wake() }
         // The overlay covers the menu bar, so it must take keys for Esc to reach the skip button.
         NSApp.activate(ignoringOtherApps: true)
         windows.first?.makeKey()
@@ -108,10 +103,7 @@ final class BreakOverlay: NSObject {
         for window in windows {
             window.orderOut(nil)
         }
-        if let mouseMonitor {
-            NSEvent.removeMonitor(mouseMonitor)
-            self.mouseMonitor = nil
-        }
+        input.stop()
         guard up else { return }
         up = false
         NSApp.presentationOptions = []
@@ -293,6 +285,37 @@ final class BreakOverlay: NSObject {
 /// Borderless windows refuse key status by default, which would leave Esc with nowhere to go.
 final class OverlayWindow: NSWindow {
     override var canBecomeKey: Bool { true }
+}
+
+/// Calls back when the mouse moves, clicks, scrolls, or a key is pressed, whether or not Workholic
+/// is the active app. A local monitor alone misses everything once another app has the focus.
+/// Keys pressed in other apps reach it only with Accessibility access; the mouse always does.
+@MainActor
+final class InputWatcher {
+    private var monitors: [Any] = []
+    private static let events: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDown, .rightMouseDown, .scrollWheel, .keyDown]
+
+    func start(_ handler: @escaping @MainActor () -> Void) {
+        guard monitors.isEmpty else { return }
+        if let local = NSEvent.addLocalMonitorForEvents(matching: Self.events, handler: { event in
+            MainActor.assumeIsolated { handler() }
+            return event
+        }) {
+            monitors.append(local)
+        }
+        if let global = NSEvent.addGlobalMonitorForEvents(matching: Self.events, handler: { _ in
+            MainActor.assumeIsolated { handler() }
+        }) {
+            monitors.append(global)
+        }
+    }
+
+    func stop() {
+        for monitor in monitors {
+            NSEvent.removeMonitor(monitor)
+        }
+        monitors = []
+    }
 }
 
 /// Works on the first click even though the overlay window was not active yet.

@@ -4,7 +4,7 @@ import QuartzCore
 /// A black cover on every display while the user is away and an agent works.
 /// It is built to cost little: no per-second timer, dim text, and one slow dot
 /// that the window server animates at a low frame rate without waking the app.
-/// The backlight goes down with it.
+/// The backlight goes down with it, and comes up for a few seconds when the mouse moves or a key is pressed.
 ///
 /// Locked, it also blocks app switching, Force Quit, and logging out while it is up, and the
 /// buttons ask for the Mac's password first. Programs keep running and the Mac stays awake.
@@ -24,6 +24,12 @@ final class PauseOverlay: NSObject {
     /// The cover is meant to be on screen: set by `show`, cleared by `hide`.
     private var up = false
     private var prompting = false
+    /// Moving the mouse brings the backlight up so the screen can be read; it goes down after a quiet spell.
+    private let input = InputWatcher()
+    private var lastInput = Date.distantPast
+    private var dimTimer: Timer?
+
+    private static let wakeFor: TimeInterval = 8
 
     private static let kiosk: NSApplication.PresentationOptions = [
         .hideDock, .hideMenuBar, .disableAppleMenu, .disableProcessSwitching,
@@ -64,6 +70,7 @@ final class PauseOverlay: NSObject {
             window.orderFrontRegardless()
         }
         backlight?.dim()
+        input.start { [weak self] in self?.wake() }
         if locked { NSApp.presentationOptions = Self.kiosk }
         for dot in dots {
             breathe(dot)
@@ -90,6 +97,9 @@ final class PauseOverlay: NSObject {
         }
         up = false
         prompting = false
+        input.stop()
+        dimTimer?.invalidate()
+        dimTimer = nil
         backlight?.restore()
         if locked { NSApp.presentationOptions = [] }
     }
@@ -101,6 +111,28 @@ final class PauseOverlay: NSObject {
             window.level = prompting ? .normal : .screenSaver
         }
         if prompting { backlight?.restore() } else { backlight?.dim() }
+    }
+
+    /// Brightens at once; one timer, pushed back by later input, dims again after a quiet spell.
+    private func wake() {
+        guard up, !prompting else { return }
+        lastInput = Date()
+        backlight?.restore()
+        if dimTimer == nil { scheduleDim(after: Self.wakeFor) }
+    }
+
+    private func scheduleDim(after seconds: TimeInterval) {
+        let timer = Timer(timeInterval: seconds, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.dimTimer = nil
+                guard self.up, !self.prompting else { return }
+                let quiet = Date().timeIntervalSince(self.lastInput)
+                if quiet >= Self.wakeFor { self.backlight?.dim() } else { self.scheduleDim(after: Self.wakeFor - quiet) }
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        dimTimer = timer
     }
 
     @objc private func screensChanged() {
