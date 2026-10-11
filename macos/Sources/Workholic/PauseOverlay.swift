@@ -24,6 +24,8 @@ final class PauseOverlay: NSObject {
     /// The cover is meant to be on screen: set by `show`, cleared by `hide`.
     private var up = false
     private var prompting = false
+    /// The next layout makes new windows even when the screens did not change.
+    private var rebuildNext = false
     /// Moving the mouse brings the backlight up so the screen can be read; it goes down after a quiet spell.
     private let input = InputWatcher()
     private var lastInput = Date.distantPast
@@ -114,8 +116,10 @@ final class PauseOverlay: NSObject {
     }
 
     /// Brightens at once; one timer, pushed back by later input, dims again after a quiet spell.
+    /// Input is also the fallback for a desktop change the Space notification missed.
     private func wake() {
         guard up, !prompting else { return }
+        if strandedOnOtherSpace { reshow(rebuilding: true) }
         lastInput = Date()
         backlight?.restore()
         if dimTimer == nil { scheduleDim(after: Self.wakeFor) }
@@ -137,16 +141,29 @@ final class PauseOverlay: NSObject {
 
     @objc private func screensChanged() {
         guard up else { return }
-        let wasPrompting = prompting
-        show(since: since, locked: locked)
-        if wasPrompting { makeRoomForPrompt(true) }
+        reshow()
     }
 
     @objc private func spaceChanged() {
         guard up else { return }
+        if strandedOnOtherSpace { return reshow(rebuilding: true) }
         for window in windows {
             window.orderFrontRegardless()
         }
+    }
+
+    /// Windows set to join every Space can still be left behind on the desktop they opened on.
+    private var strandedOnOtherSpace: Bool {
+        windows.contains { $0.isVisible && !$0.isOnActiveSpace }
+    }
+
+    /// Shows the cover again, keeping the password prompt on top if it is up.
+    /// `rebuilding` makes new windows, which open on the desktop now showing.
+    private func reshow(rebuilding: Bool = false) {
+        let wasPrompting = prompting
+        rebuildNext = rebuilding
+        show(since: since, locked: locked)
+        if wasPrompting { makeRoomForPrompt(true) }
     }
 
     @objc private func unpause() {
@@ -178,7 +195,9 @@ final class PauseOverlay: NSObject {
 
     private func layout() {
         let screens = NSScreen.screens
-        if windows.count == screens.count, zip(windows, screens).allSatisfy({ $0.frame.equalTo($1.frame) }) {
+        let rebuild = rebuildNext
+        rebuildNext = false
+        if !rebuild, windows.count == screens.count, zip(windows, screens).allSatisfy({ $0.frame.equalTo($1.frame) }) {
             return
         }
         for window in windows {

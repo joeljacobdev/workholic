@@ -55,11 +55,12 @@ final class BreakOverlay: NSObject {
 
     /// `snoozable` adds "5 more minutes", which scheduled pauses offer.
     func show(message: String, remainingMs: Int64, snoozable: Bool = false) {
+        // Only a cover going up anew starts loud. A rebuild for a new desktop or display keeps the quiet.
+        let wasHidden = !up
         up = true
         self.message = message
         self.snoozable = snoozable
         layout()
-        let wasHidden = !(windows.first?.isVisible ?? false)
         if wasHidden {
             shownAt = Date()
             wakeUntil = nil
@@ -90,11 +91,22 @@ final class BreakOverlay: NSObject {
 
     /// Runs every second while the break counts down. A cover that something took down goes back up.
     func update(message: String? = nil, remainingMs: Int64) {
-        if up, !fitsScreens || windows.contains(where: { !$0.isVisible }) {
-            show(message: message ?? self.message, remainingMs: remainingMs, snoozable: snoozable)
+        if up, !fitsScreens || strandedOnOtherSpace || windows.contains(where: { !$0.isVisible }) {
+            rebuild(message: message ?? self.message, remainingMs: remainingMs)
             return
         }
         apply(message: message, remainingMs: remainingMs)
+    }
+
+    /// Windows set to join every Space can still be left behind on the desktop they opened on.
+    private var strandedOnOtherSpace: Bool {
+        windows.contains { $0.isVisible && !$0.isOnActiveSpace }
+    }
+
+    /// New windows, ordered front on the desktop now showing.
+    private func rebuild(message: String, remainingMs: Int64) {
+        if strandedOnOtherSpace { laidOutFor = nil }
+        show(message: message, remainingMs: remainingMs, snoozable: snoozable)
     }
 
     /// Only a cover that is up gives back the backlight and the presentation options.
@@ -117,6 +129,10 @@ final class BreakOverlay: NSObject {
 
     @objc private func spaceChanged() {
         guard up else { return }
+        if strandedOnOtherSpace {
+            rebuild(message: message, remainingMs: remainingMs)
+            return
+        }
         for window in windows {
             window.orderFrontRegardless()
         }
