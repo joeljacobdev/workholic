@@ -1,6 +1,7 @@
 import { parseBreakSettings } from "./breaks";
 import { isValidTimeZone } from "./day";
 import { Directory, normalizeUsername, passwordAccepted } from "./directory";
+import { ensureCurrent } from "./fresh";
 import { sameSecret, sha256Hex } from "./password";
 import { SESSION_MS, SESSION_RENEW_AFTER_MS, UserAccount, type IntervalInput } from "./user-account";
 
@@ -61,6 +62,7 @@ export default {
     if (request.method === "POST" && url.pathname === "/v1/signup") return json({ error: "no_signup" }, 404);
 
     try {
+      await ensureCurrent(env, "directory", directory(env));
       if (request.method === "POST" && url.pathname === "/v1/admin/users") return await createUser(request, env);
       if (request.method === "POST" && url.pathname === "/v1/admin/limits") return await setLimit(request, env);
       if (request.method === "POST" && url.pathname === "/v1/admin/timezone") return await setTimezone(request, env);
@@ -149,6 +151,7 @@ async function setLimit(request: Request, env: Env): Promise<Response> {
   if (!Number.isInteger(limitMs) || (limitMs as number) < 0) return json({ error: "bad_limit" }, 422);
   const found = await directory(env).lookup(username);
   if (!found) return json({ error: "no_such_user" }, 404);
+  await ensureCurrent(env, found.userId, account(env, found.userId));
   try {
     const result = await account(env, found.userId).setLimit({ limitMs: limitMs as number, now: Date.now() });
     return json({ username: found.username, ...result });
@@ -167,6 +170,7 @@ async function setTimezone(request: Request, env: Env): Promise<Response> {
   if (!isValidTimeZone(timezone)) return json({ error: "bad_timezone" }, 422);
   const found = await directory(env).lookup(username);
   if (!found) return json({ error: "no_such_user" }, 404);
+  await ensureCurrent(env, found.userId, account(env, found.userId));
   const result = await account(env, found.userId).setTimezone({ timezone, now: Date.now() });
   return json({ username: found.username, timezone: result.timezone, days_rebuilt: result.daysRebuilt });
 }
@@ -181,6 +185,7 @@ async function setPassword(request: Request, env: Env): Promise<Response> {
   if (!passwordAccepted(password)) return json({ error: "bad_password" }, 422);
   const found = await directory(env).lookup(username);
   if (!found) return json({ error: "no_such_user" }, 404);
+  await ensureCurrent(env, found.userId, account(env, found.userId));
   await directory(env).updatePassword({ userId: found.userId, password });
   await account(env, found.userId).revokeSessions(Date.now());
   return json({ username: found.username, password_updated: true, sessions_revoked: true });
@@ -219,6 +224,7 @@ async function logout(request: Request, env: Env): Promise<Response> {
   const tokenHash = await sha256Hex(token);
   const found = await directory(env).findToken({ tokenHash, now: Date.now() });
   if (found) {
+    await ensureCurrent(env, found.userId, account(env, found.userId));
     await account(env, found.userId).endSession({ token, now: Date.now() });
     await directory(env).forgetSession(tokenHash);
   }
@@ -412,6 +418,8 @@ async function userIdForToken(env: Env, token: string): Promise<string | null> {
   const now = Date.now();
   const found = await directory(env).findToken({ tokenHash, now });
   if (!found) return null;
+  // Every signed-in route comes through here, so this is where an account on older code gets restarted.
+  await ensureCurrent(env, found.userId, account(env, found.userId));
   if (found.kind === "session" && found.expiresAtMs !== null && found.expiresAtMs - now < SESSION_MS - SESSION_RENEW_AFTER_MS) {
     const expiresAtMs = await account(env, found.userId).renewSession({ token, now });
     if (expiresAtMs === null) return null;

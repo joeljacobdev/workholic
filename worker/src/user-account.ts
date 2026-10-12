@@ -2,6 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 import { DEFAULT_BREAKS, mergeBreakSettings, withBreakDefaults, type BreakSettings, type BreakSettingsInput } from "./breaks";
 import { limitCutoff, standingLimit } from "./ceiling";
 import { dayKey, dayWindow, daysTouched } from "./day";
+import { restartIfOlder, type CodeVersion } from "./fresh";
 import { creditDay, type DayCredit, type RawInterval } from "./merge";
 import { base64url, sha256Hex } from "./password";
 
@@ -257,6 +258,11 @@ export class UserAccount extends DurableObject<Env> {
         this.ctx.storage.sql.exec("ALTER TABLE device ADD COLUMN last_seen_at_ms INTEGER");
       }
     });
+  }
+
+  /** Called once by each fresh Worker isolate; restarts this object if it still runs older code. See fresh.ts. */
+  async restartIfOlder(caller: CodeVersion): Promise<"current"> {
+    return restartIfOlder(this.ctx, this.env.CF_VERSION_METADATA, caller);
   }
 
   async init(input: { userId: string; username: string; timezone: string; now: number }): Promise<void> {

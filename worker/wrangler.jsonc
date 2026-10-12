@@ -24,6 +24,10 @@
       "simple": { "limit": 10, "period": 60 }
     }
   ],
+  // Which deployed version is running. src/fresh.ts uses it to restart objects still on older code.
+  "version_metadata": {
+    "binding": "CF_VERSION_METADATA"
+  },
   "durable_objects": {
     "bindings": [
       { "name": "DIRECTORY", "class_name": "Directory" },

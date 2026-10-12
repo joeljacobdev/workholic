@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { restartIfOlder, type CodeVersion } from "./fresh";
 import { base64ToBytes, bytesToBase64, dummyHash, hashPassword, PBKDF2_ITERATIONS, timingSafeEqual } from "./password";
 
 const USERNAME = /^[a-z][a-z0-9._-]{1,31}$/;
@@ -45,6 +46,11 @@ export class Directory extends DurableObject<Env> {
         this.ctx.storage.sql.exec(statement);
       }
     });
+  }
+
+  /** Called once by each fresh Worker isolate; restarts this object if it still runs older code. See fresh.ts. */
+  async restartIfOlder(caller: CodeVersion): Promise<"current"> {
+    return restartIfOlder(this.ctx, this.env.CF_VERSION_METADATA, caller);
   }
 
   async createUser(input: { username: string; password: string; now: number }): Promise<{ ok: true; userId: string } | { ok: false; error: "exists" | "bad_username" | "bad_password" }> {
