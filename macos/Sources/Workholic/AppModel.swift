@@ -47,8 +47,9 @@ final class AppModel {
     private let pauseOverlay = PauseOverlay()
     /// Shared by the break and pause covers, which never show together.
     private let backlight = Backlight()
-    /// The password prompt for a locked pause is up.
-    private var unlocking = false
+    /// The password prompt for a locked pause that is up, and which ask it is; answers to an older ask are ignored.
+    private var unlockContext: LAContext?
+    private var unlockAttempt = 0
     private static let pauseLocksKey = "pauseNeedsPassword"
     private let power = PowerAssertion()
     /// Keeps the display on while a break covers it, so the break is a dark screen, not a sleeping one.
@@ -386,18 +387,23 @@ final class AppModel {
 
     /// Asks for the Mac's password (or Touch ID) before leaving a locked pause.
     /// A Mac with no password to ask for does not lock anyone out.
+    /// A click while a prompt is already open means that prompt is out of sight, perhaps on another
+    /// display, so the old one is closed and a new one asked; ignoring the click left Unpause dead.
     private func unlock(then next: Unlocked) {
         guard pauseLocks else { return proceed(next) }
-        guard !unlocking else { return }
+        unlockContext?.invalidate()
+        unlockContext = nil
         let context = LAContext()
         var error: NSError?
         guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) else { return proceed(next) }
-        unlocking = true
+        unlockAttempt += 1
+        let attempt = unlockAttempt
+        unlockContext = context
         pauseOverlay.makeRoomForPrompt(true)
         context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "unlock the paused screen") { ok, _ in
             Task { @MainActor [weak self] in
-                guard let self else { return }
-                self.unlocking = false
+                guard let self, attempt == self.unlockAttempt else { return }
+                self.unlockContext = nil
                 if ok {
                     self.proceed(next)
                 } else if self.pauseCovering {

@@ -83,6 +83,10 @@ final class Backlight: NSObject {
         }
         saved = [:]
         persist()
+        // A display can fail to answer for a moment while monitors rearrange; try it again shortly.
+        if !owed.isEmpty {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in self?.displaysChanged() }
+        }
         if animated {
             restoring = targets.mapValues(\.to)
             animate(targets)

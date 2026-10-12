@@ -2,8 +2,8 @@ import AppKit
 import QuartzCore
 
 /// A black cover on every display while the user is away and an agent works.
-/// It is built to cost little: no per-second timer, dim text, and one slow dot
-/// that the window server animates at a low frame rate without waking the app.
+/// It is built to cost little: dim text, one slow dot that the window server animates at a low
+/// frame rate without waking the app, and only two light checks: input each second, the cover every two.
 /// The backlight goes down with it, and comes up for a few seconds when the mouse moves or a key is pressed.
 ///
 /// Locked, it also blocks app switching, Force Quit, and logging out while it is up, and the
@@ -30,6 +30,11 @@ final class PauseOverlay: NSObject {
     private let input = InputWatcher()
     private var lastInput = Date.distantPast
     private var dimTimer: Timer?
+    /// Every two seconds while up, puts back a cover that is missing from some display.
+    private var guardTimer: Timer?
+    private var rebuiltAt = Date.distantPast
+    /// Set while the cover is put back under the password prompt, which keeps the focus.
+    private var keepFocus = false
 
     private static let wakeFor: TimeInterval = 8
 
@@ -56,10 +61,16 @@ final class PauseOverlay: NSObject {
     func show(since: Date, locked: Bool) {
         self.since = since
         self.locked = locked
+        // A pause going up anew starts dark, even if the last one was woken a moment ago.
+        if !up { lastInput = .distantPast }
         up = true
         prompting = false
-        layout()
         if NSApp.isHidden { NSApp.unhide(nil) }
+        layout()
+        for window in windows {
+            window.level = .screenSaver
+            window.orderFrontRegardless()
+        }
         refreshElapsed()
         let note = locked
             ? "Locked. Your Mac stays awake and this time is not counted. Unpausing asks for your Mac password."
@@ -67,18 +78,18 @@ final class PauseOverlay: NSObject {
         for field in notes {
             field.stringValue = note
         }
-        for window in windows {
-            window.level = .screenSaver
-            window.orderFrontRegardless()
-        }
-        backlight?.dim()
+        // The screen goes dark once the cover is seen to be on every display.
+        checkSoon()
         input.start { [weak self] in self?.wake() }
         if locked { NSApp.presentationOptions = Self.kiosk }
         for dot in dots {
             breathe(dot)
         }
-        NSApp.activate(ignoringOtherApps: true)
-        windows.first?.makeKey()
+        // Taking the focus while the password prompt is up would send the typed password nowhere.
+        if !keepFocus {
+            NSApp.activate(ignoringOtherApps: true)
+            windows.first?.makeKey()
+        }
         minuteTimer?.invalidate()
         let timer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshElapsed() }
@@ -86,11 +97,57 @@ final class PauseOverlay: NSObject {
         timer.tolerance = 15
         RunLoop.main.add(timer, forMode: .common)
         minuteTimer = timer
+        guardTimer?.invalidate()
+        let check = Timer(timeInterval: 2, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.checkCover() }
+        }
+        check.tolerance = 0.5
+        RunLoop.main.add(check, forMode: .common)
+        guardTimer = check
+    }
+
+    /// The window server lists a window as on screen only a run loop turn after it is ordered front,
+    /// so a check right away would find every new cover missing.
+    private func checkSoon() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in self?.checkCover() }
+    }
+
+    /// The screen goes dark only while every display shows the cover, and not in the seconds after
+    /// input. A dark screen with no cover on it would hide nothing and leave the user to find the
+    /// brightness keys.
+    private func dimIfCovered() {
+        guard allOnScreen(windows) else {
+            backlight?.restore()
+            return
+        }
+        let quiet = Date().timeIntervalSince(lastInput)
+        if quiet >= Self.wakeFor {
+            backlight?.dim()
+        } else if dimTimer == nil {
+            scheduleDim(after: Self.wakeFor - quiet)
+        }
+    }
+
+    /// Puts a cover that went missing back where the user is, and dims the screen once it is there.
+    /// Notifications for a new display or desktop can come late or not at all, and a missing cover
+    /// would leave the Mac unlocked. New windows get a second and a half to show before the next rebuild.
+    private func checkCover() {
+        guard up else { return }
+        if !allOnScreen(windows) {
+            backlight?.restore()
+            if Date().timeIntervalSince(rebuiltAt) > 1.5 { reshow(rebuilding: true) }
+        } else if !fitsScreens {
+            reshow()
+        } else if !prompting {
+            dimIfCovered()
+        }
     }
 
     func hide() {
         minuteTimer?.invalidate()
         minuteTimer = nil
+        guardTimer?.invalidate()
+        guardTimer = nil
         for dot in dots {
             dot.removeAllAnimations()
         }
@@ -112,17 +169,16 @@ final class PauseOverlay: NSObject {
         for window in windows {
             window.level = prompting ? .normal : .screenSaver
         }
-        if prompting { backlight?.restore() } else { backlight?.dim() }
+        if prompting { backlight?.restore() } else { dimIfCovered() }
     }
 
     /// Brightens at once; one timer, pushed back by later input, dims again after a quiet spell.
     /// Input is also the fallback for a desktop or display change a notification missed.
     private func wake() {
         guard up, !prompting else { return }
-        if strandedOnOtherSpace { reshow(rebuilding: true) } else if !fitsScreens { reshow() }
         lastInput = Date()
         backlight?.restore()
-        if dimTimer == nil { scheduleDim(after: Self.wakeFor) }
+        checkCover()
     }
 
     private func scheduleDim(after seconds: TimeInterval) {
@@ -131,23 +187,18 @@ final class PauseOverlay: NSObject {
                 guard let self else { return }
                 self.dimTimer = nil
                 guard self.up, !self.prompting else { return }
-                let quiet = Date().timeIntervalSince(self.lastInput)
-                if quiet >= Self.wakeFor { self.backlight?.dim() } else { self.scheduleDim(after: Self.wakeFor - quiet) }
+                self.dimIfCovered()
             }
         }
         RunLoop.main.add(timer, forMode: .common)
         dimTimer = timer
     }
 
-    /// A monitor being plugged in sends several of these, and the screen list can trail the last one,
-    /// so the cover looks again a moment later. The break cover needs no second look: it checks every second.
+    /// A monitor being plugged in sends several of these, and the screen list can trail the last one;
+    /// the guard timer catches what this misses.
     @objc private func screensChanged() {
         guard up else { return }
         reshow()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
-            guard let self, self.up, !self.fitsScreens else { return }
-            self.reshow()
-        }
     }
 
     /// One window per screen, each covering its screen exactly.
@@ -158,15 +209,10 @@ final class PauseOverlay: NSObject {
 
     @objc private func spaceChanged() {
         guard up else { return }
-        if strandedOnOtherSpace { return reshow(rebuilding: true) }
         for window in windows {
             window.orderFrontRegardless()
         }
-    }
-
-    /// Windows set to join every Space can still be left behind on the desktop they opened on.
-    private var strandedOnOtherSpace: Bool {
-        windows.contains { $0.isVisible && !$0.isOnActiveSpace }
+        checkSoon()
     }
 
     /// Shows the cover again, keeping the password prompt on top if it is up.
@@ -174,7 +220,9 @@ final class PauseOverlay: NSObject {
     private func reshow(rebuilding: Bool = false) {
         let wasPrompting = prompting
         rebuildNext = rebuilding
+        keepFocus = wasPrompting
         show(since: since, locked: locked)
+        keepFocus = false
         if wasPrompting { makeRoomForPrompt(true) }
     }
 
@@ -210,6 +258,7 @@ final class PauseOverlay: NSObject {
         let rebuild = rebuildNext
         rebuildNext = false
         if !rebuild, fitsScreens { return }
+        rebuiltAt = Date()
         for window in windows {
             window.orderOut(nil)
         }
@@ -233,6 +282,9 @@ final class PauseOverlay: NSObject {
             window.backgroundColor = .black
             window.hidesOnDeactivate = false
             window.isReleasedWhenClosed = false
+            // Without this an active Workholic gets no mouse moves at all, and moving the mouse could not brighten the screen.
+            window.ignoresMouseEvents = false
+            window.acceptsMouseMovedEvents = true
 
             let size = screen.frame.size
             let content = NSView(frame: NSRect(origin: .zero, size: size))

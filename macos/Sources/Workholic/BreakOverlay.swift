@@ -73,6 +73,7 @@ final class BreakOverlay: NSObject {
         for window in windows {
             window.orderFrontRegardless()
         }
+        orderedAt = Date()
         NSApp.presentationOptions = Self.lockdown
         apply(message: message, remainingMs: remainingMs)
         input.start { [weak self] in self?.wake() }
@@ -91,16 +92,24 @@ final class BreakOverlay: NSObject {
 
     /// Runs every second while the break counts down. A cover that something took down goes back up.
     func update(message: String? = nil, remainingMs: Int64) {
-        if up, !fitsScreens || strandedOnOtherSpace || windows.contains(where: { !$0.isVisible }) {
+        if up, !fitsScreens || (strandedOnOtherSpace && !settling) {
             rebuild(message: message ?? self.message, remainingMs: remainingMs)
             return
         }
         apply(message: message, remainingMs: remainingMs)
     }
 
-    /// Windows set to join every Space can still be left behind on the desktop they opened on.
+    /// The window server lists a window as on screen only a run loop turn after it is ordered front.
+    /// Until then a cover cannot be judged missing, and the backlight is left as it is.
+    private var orderedAt = Date.distantPast
+    private var settling: Bool {
+        Date().timeIntervalSince(orderedAt) < 1.5
+    }
+
+    /// Windows set to join every Space can still be left behind on the desktop they opened on,
+    /// or be taken down by something else. Either way some display shows no cover.
     private var strandedOnOtherSpace: Bool {
-        windows.contains { $0.isVisible && !$0.isOnActiveSpace }
+        !allOnScreen(windows)
     }
 
     /// New windows, ordered front on the desktop now showing.
@@ -127,16 +136,21 @@ final class BreakOverlay: NSObject {
         show(message: message, remainingMs: remainingMs, snoozable: snoozable)
     }
 
+    /// The window server shows a window as on screen only a run loop turn after it is ordered front,
+    /// so the check waits a moment.
     @objc private func spaceChanged() {
         guard up else { return }
-        if strandedOnOtherSpace {
-            rebuild(message: message, remainingMs: remainingMs)
-            return
-        }
         for window in windows {
             window.orderFrontRegardless()
         }
-        fade()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            guard let self, self.up else { return }
+            if self.strandedOnOtherSpace {
+                self.rebuild(message: self.message, remainingMs: self.remainingMs)
+                return
+            }
+            self.fade()
+        }
     }
 
     private func wake() {
@@ -145,14 +159,14 @@ final class BreakOverlay: NSObject {
     }
 
     /// Loud at the start, near the end, and just after the mouse moved. Quiet otherwise.
-    /// The backlight goes down only while the cover is really on the screen being looked at.
+    /// The backlight goes down only while every display really shows the cover.
     private func fade() {
         let now = Date()
         let loud = remainingMs <= Self.loudUnderMs
             || now.timeIntervalSince(shownAt) < Self.quietAfter
             || (wakeUntil.map { now < $0 } ?? false)
-        let covered = windows.contains { $0.isVisible && $0.isOnActiveSpace }
-        if loud || !covered { backlight?.restore() } else { backlight?.dim() }
+        let covered = up && allOnScreen(windows)
+        if loud || (!covered && !settling) { backlight?.restore() } else if covered { backlight?.dim() }
         let target: CGFloat = loud ? 1 : Self.quietAlpha
         let messageTarget: CGFloat = loud ? 1 : Self.quietMessageAlpha
         guard let current = faders.first?.alphaValue, abs(current - target) > 0.01 else { return }
@@ -310,16 +324,55 @@ final class OverlayWindow: NSWindow {
     }
 }
 
+/// Whether every window is really on the screen: on the desktop each display shows now.
+/// `isOnActiveSpace` can call a window present that sits on a desktop no display is showing,
+/// above all with a second monitor, so this asks the window server instead.
+@MainActor
+func allOnScreen(_ windows: [NSWindow]) -> Bool {
+    guard !windows.isEmpty else { return false }
+    // Behind the macOS lock screen or another user's session nothing of ours shows; that is no missing cover.
+    if let session = CGSessionCopyCurrentDictionary() as? [String: Any],
+       (session[kCGSessionOnConsoleKey as String] as? Bool) == false || (session["CGSSessionScreenIsLocked"] as? Bool) == true {
+        return true
+    }
+    guard let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else { return true }
+    let pid = ProcessInfo.processInfo.processIdentifier
+    let showing = Set(info.compactMap { entry -> Int? in
+        guard (entry[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == pid else { return nil }
+        return (entry[kCGWindowNumber as String] as? NSNumber)?.intValue
+    })
+    return windows.allSatisfy { showing.contains($0.windowNumber) }
+}
+
 /// Calls back when the mouse moves, clicks, scrolls, or a key is pressed, whether or not Workholic
 /// is the active app. A local monitor alone misses everything once another app has the focus.
 /// Keys pressed in other apps reach it only with Accessibility access; the mouse always does.
+///
+/// The monitors are fast but can miss input: an active app gets no mouse moves unless its key window
+/// asks for them, and that window may sit on a desktop out of sight. So a check once a second of when
+/// the keyboard or mouse was last touched catches the rest. It needs no permission.
 @MainActor
 final class InputWatcher {
     private var monitors: [Any] = []
+    private var poll: Timer?
     private static let events: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDown, .rightMouseDown, .scrollWheel, .keyDown]
+    private static let anyInput = CGEventType(rawValue: ~0)!
 
     func start(_ handler: @escaping @MainActor () -> Void) {
-        guard monitors.isEmpty else { return }
+        guard poll == nil else { return }
+        var seen = Date()
+        let timer = Timer(timeInterval: 1, repeats: true) { _ in
+            MainActor.assumeIsolated {
+                let idle = CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: Self.anyInput)
+                let touched = Date().addingTimeInterval(-idle)
+                guard touched > seen.addingTimeInterval(0.05) else { return }
+                seen = touched
+                handler()
+            }
+        }
+        timer.tolerance = 0.3
+        RunLoop.main.add(timer, forMode: .common)
+        poll = timer
         if let local = NSEvent.addLocalMonitorForEvents(matching: Self.events, handler: { event in
             MainActor.assumeIsolated { handler() }
             return event
@@ -334,6 +387,8 @@ final class InputWatcher {
     }
 
     func stop() {
+        poll?.invalidate()
+        poll = nil
         for monitor in monitors {
             NSEvent.removeMonitor(monitor)
         }
