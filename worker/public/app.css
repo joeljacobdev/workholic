@@ -246,6 +246,9 @@ h2 + .row { border-top: 0; }
 .device-list li { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line); }
 .device-list li:first-child { border-top: 0; }
 .device-list .meta { grid-column: 2; font-size: 13px; color: var(--muted); }
+.device-list .actions { grid-column: 2; display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; font-size: 13px; color: var(--muted); }
+.device-list .actions:empty { display: none; }
+button.link.warn { color: var(--over); }
 
 /* Breaks */
 label.check { display: flex; align-items: center; gap: 10px; color: var(--ink); font-size: 16px; margin: 0 0 12px; }

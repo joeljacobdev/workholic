@@ -77,6 +77,13 @@ export default {
       if (request.method === "PUT" && url.pathname === "/v1/breaks") return await putBreaks(request, env);
       const upload = /^\/v1\/devices\/([0-9a-f-]{36})\/intervals:upload$/.exec(url.pathname);
       if (request.method === "POST" && upload) return await uploadIntervals(request, env, upload[1]);
+      const shutdown = /^\/v1\/devices\/([0-9a-f-]{36})\/shutdown$/.exec(url.pathname);
+      if (request.method === "POST" && shutdown) return await requestShutdown(request, env, shutdown[1]);
+      if (request.method === "DELETE" && shutdown) return await cancelShutdown(request, env, shutdown[1]);
+      const commands = /^\/v1\/devices\/([0-9a-f-]{36})\/commands$/.exec(url.pathname);
+      if (request.method === "GET" && commands) return await pendingCommands(request, env, commands[1]);
+      const ack = /^\/v1\/devices\/([0-9a-f-]{36})\/commands\/([0-9a-f-]{36}):ack$/.exec(url.pathname);
+      if (request.method === "POST" && ack) return await ackCommand(request, env, ack[1], ack[2]);
       return json({ error: "not_found" }, 404);
     } catch (error) {
       console.log(JSON.stringify({ error: error instanceof Error ? error.name : "unknown" }));
@@ -346,6 +353,56 @@ async function uploadIntervals(request: Request, env: Env, deviceId: string): Pr
   const status = Number(result.status) || 200;
   const { status: _status, ...body } = result;
   return json(body, status);
+}
+
+function commandResponse<T extends object>(result: T | { error: string; status: number }): Response {
+  if ("error" in result && "status" in result) return json({ error: result.error }, result.status);
+  return json(result);
+}
+
+// Asking for or cancelling a shutdown takes a login session; the account refuses a device token.
+async function requestShutdown(request: Request, env: Env, deviceId: string): Promise<Response> {
+  const token = bearer(request);
+  if (!token) return json({ error: "bad_token" }, 401);
+  const userId = await userIdForToken(env, token);
+  if (!userId) return json({ error: "bad_token" }, 401);
+  return commandResponse(await account(env, userId).requestShutdown({ sessionToken: token, deviceId, now: Date.now() }));
+}
+
+async function cancelShutdown(request: Request, env: Env, deviceId: string): Promise<Response> {
+  const token = bearer(request);
+  if (!token) return json({ error: "bad_token" }, 401);
+  const userId = await userIdForToken(env, token);
+  if (!userId) return json({ error: "bad_token" }, 401);
+  return commandResponse(await account(env, userId).cancelShutdown({ sessionToken: token, deviceId, now: Date.now() }));
+}
+
+// A Mac reads and acknowledges only its own orders, with its device token.
+async function pendingCommands(request: Request, env: Env, deviceId: string): Promise<Response> {
+  const token = bearer(request);
+  if (!token) return json({ error: "bad_token" }, 401);
+  const userId = await userIdForToken(env, token);
+  if (!userId) return json({ error: "bad_token" }, 401);
+  return commandResponse(await account(env, userId).pendingCommands({ deviceToken: token, pathDeviceId: deviceId, now: Date.now() }));
+}
+
+async function ackCommand(request: Request, env: Env, deviceId: string, commandId: string): Promise<Response> {
+  const token = bearer(request);
+  if (!token) return json({ error: "bad_token" }, 401);
+  const userId = await userIdForToken(env, token);
+  if (!userId) return json({ error: "bad_token" }, 401);
+  const body = await readJson(request);
+  if (!body.ok) return body.response;
+  const result = asRecord(body.value)?.result;
+  return commandResponse(
+    await account(env, userId).ackCommand({
+      deviceToken: token,
+      pathDeviceId: deviceId,
+      commandId,
+      result: typeof result === "string" ? result : "",
+      now: Date.now(),
+    }),
+  );
 }
 
 // A login session in use stays signed in: once a day of its 30 has passed, its expiry moves

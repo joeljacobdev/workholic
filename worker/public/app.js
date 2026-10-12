@@ -635,6 +635,58 @@ function renderSettings() {
   $("set-idle").textContent = formatDuration(settings.idle_threshold_ms);
 }
 
+/** A shutdown is waiting for its Mac, so the device list is checked again with the settings. */
+let shutdownPending = false;
+
+/** A running Mac checks in about every 10 seconds and is marked seen at most once a minute. */
+function presence(ms) {
+  if (ms == null) return null;
+  const minutes = (Date.now() - ms) / 60_000;
+  if (minutes < 2) return "on now";
+  if (minutes < 60) return `last on ${Math.round(minutes)} min ago`;
+  if (minutes < 48 * 60) return `last on ${Math.round(minutes / 60)} h ago`;
+  return `last on ${Math.round(minutes / 1440)} days ago`;
+}
+
+function shutdownLine(entry) {
+  const line = el("span", "actions");
+  if (entry.revoked || entry.platform !== "macos") return line;
+  const shutdown = entry.shutdown;
+  if (shutdown?.state === "pending") {
+    line.append(el("span", "", `Shutdown asked at ${clock(shutdown.requested_at_ms)}. It runs when this Mac next checks in.`));
+    const cancel = el("button", "link", "Cancel");
+    cancel.type = "button";
+    cancel.addEventListener("click", () => changeShutdown(entry, "DELETE", cancel));
+    line.append(cancel);
+    return line;
+  }
+  // The Mac acknowledges before it acts, so this says the order arrived, not that it powered off.
+  if (shutdown?.state === "delivered") line.append(el("span", "", `Shutdown sent to this Mac at ${clock(shutdown.delivered_at_ms)}.`));
+  if (shutdown?.state === "failed") line.append(el("span", "", `Shutdown at ${clock(shutdown.delivered_at_ms)} did not go through (${shutdown.result.slice("failed:".length)}).`));
+  const ask = el("button", "link warn", "Shut down…");
+  ask.type = "button";
+  ask.addEventListener("click", () => {
+    const sure = confirm(
+      `Shut down "${entry.display_name}"?\n\nIt shuts down within seconds if it is on, or the next time Workholic runs on it. Unsaved work in open apps can stop the shutdown or be lost.`,
+    );
+    if (sure) changeShutdown(entry, "POST", ask);
+  });
+  line.append(ask);
+  return line;
+}
+
+async function changeShutdown(entry, method, button) {
+  button.disabled = true;
+  try {
+    await api(`/v1/devices/${entry.device_id}/shutdown`, { method });
+    await loadDevices();
+  } catch (error) {
+    if (error instanceof AuthError) return handleFailure(error);
+    showError(`Could not ${method === "POST" ? "ask for the shutdown" : "cancel the shutdown"} (${error.message}).`);
+    button.disabled = false;
+  }
+}
+
 async function loadDevices() {
   const stats = await api("/v1/stats");
   const info = stats.device_info ?? [];
@@ -643,11 +695,14 @@ async function loadDevices() {
   list.replaceChildren();
   for (const entry of info) {
     const item = el("li");
-    const meta = [entry.platform === "macos" ? "Mac" : entry.platform, entry.revoked ? "signed out" : ago(entry.last_upload_at_ms)];
-    item.append(swatch(device(entry.device_id).color), el("span", "", entry.display_name), el("span", "meta", meta.join(", ")));
+    const meta = [entry.platform === "macos" ? "Mac" : entry.platform];
+    if (entry.revoked) meta.push("signed out");
+    else meta.push(...[presence(entry.last_seen_at_ms), ago(entry.last_upload_at_ms)].filter(Boolean));
+    item.append(swatch(device(entry.device_id).color), el("span", "", entry.display_name), el("span", "meta", meta.join(", ")), shutdownLine(entry));
     list.append(item);
   }
   $("settings-devices-empty").hidden = info.length > 0;
+  shutdownPending = info.some((entry) => entry.shutdown?.state === "pending");
 }
 
 async function saveLimit(event) {
@@ -938,7 +993,9 @@ function startRefresh() {
     if (document.visibilityState === "visible" && currentTab() !== "settings") refresh();
   }, REFRESH_MS);
   settingsTimer = setInterval(() => {
-    if (document.visibilityState === "visible" && currentTab() === "settings") checkSettings();
+    if (document.visibilityState !== "visible" || currentTab() !== "settings") return;
+    checkSettings();
+    if (shutdownPending) loadDevices().catch(handleFailure);
   }, SETTINGS_CHECK_MS);
 }
 

@@ -61,8 +61,27 @@ export interface DeviceInfo {
   platform: string;
   created_at_ms: number;
   last_upload_at_ms: number | null;
+  /** When the device last asked for its commands, about every 10 seconds while it runs. */
+  last_seen_at_ms: number | null;
   revoked: boolean;
+  /** The latest shutdown asked for on this device, if any. */
+  shutdown: ShutdownState | null;
 }
+
+export interface ShutdownState {
+  command_id: string;
+  state: "pending" | "cancelled" | "delivered" | "failed";
+  requested_at_ms: number;
+  delivered_at_ms: number | null;
+  result: string | null;
+}
+
+export type CommandResult<T> = T | { error: string; status: number };
+
+/** What the device reports back. "delivered" comes before it acts; "failed:<reason>" after, if acting failed. */
+const COMMAND_RESULT = /^(delivered|failed:[\w .:-]{1,120})$/;
+/** A device marks itself seen at most this often, so polling every few seconds is not a write every few seconds. */
+const SEEN_EVERY_MS = 60_000;
 
 export type StatsResult =
   | { error: string; status: number }
@@ -220,8 +239,23 @@ export class UserAccount extends DurableObject<Env> {
           settings_json TEXT NOT NULL,
           updated_at_ms INTEGER NOT NULL
         )`,
+        // One-time orders for a device, such as a shutdown asked for on the web. Rows are kept as a record.
+        `CREATE TABLE IF NOT EXISTS device_command (
+          command_id TEXT PRIMARY KEY,
+          device_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          requested_at_ms INTEGER NOT NULL,
+          cancelled_at_ms INTEGER,
+          delivered_at_ms INTEGER,
+          result TEXT
+        )`,
+        `CREATE INDEX IF NOT EXISTS device_command_device ON device_command (device_id, requested_at_ms)`,
       ];
       for (const statement of statements) this.ctx.storage.sql.exec(statement);
+      const deviceColumns = this.ctx.storage.sql.exec<{ name: string }>("PRAGMA table_info(device)").toArray();
+      if (!deviceColumns.some((column) => column.name === "last_seen_at_ms")) {
+        this.ctx.storage.sql.exec("ALTER TABLE device ADD COLUMN last_seen_at_ms INTEGER");
+      }
     });
   }
 
@@ -408,6 +442,119 @@ export class UserAccount extends DurableObject<Env> {
 
   private storedBreaks(json: string): BreakSettings {
     return withBreakDefaults(JSON.parse(json) as BreakSettingsInput);
+  }
+
+  // Remote shutdown. Only a login session can ask for or cancel one, never a device token,
+  // so a token taken from one Mac cannot shut down another. A device reads only its own orders.
+
+  /** Asks a Mac to shut down the next time it checks in. Asking again while one is pending returns that one. */
+  async requestShutdown(input: { sessionToken: string; deviceId: string; now: number }): Promise<CommandResult<ShutdownState>> {
+    if (!(await this.sessionFor(input.sessionToken, input.now))) return { error: "bad_token", status: 401 };
+    const device = this.ctx.storage.sql
+      .exec<{ platform: string; revoked_at_ms: number | null }>("SELECT platform, revoked_at_ms FROM device WHERE device_id = ?", input.deviceId)
+      .toArray()[0];
+    if (!device) return { error: "no_such_device", status: 404 };
+    if (device.revoked_at_ms !== null) return { error: "revoked", status: 409 };
+    if (device.platform !== "macos") return { error: "not_supported", status: 422 };
+    const pending = this.latestShutdown(input.deviceId);
+    if (pending?.state === "pending") return pending;
+    this.ctx.storage.sql.exec(
+      "INSERT INTO device_command (command_id, device_id, kind, requested_at_ms, cancelled_at_ms, delivered_at_ms, result) VALUES (?, ?, 'shutdown', ?, NULL, NULL, NULL)",
+      crypto.randomUUID(),
+      input.deviceId,
+      input.now,
+    );
+    return this.latestShutdown(input.deviceId)!;
+  }
+
+  /** Withdraws a shutdown the Mac has not picked up yet. One already delivered cannot be called back. */
+  async cancelShutdown(input: { sessionToken: string; deviceId: string; now: number }): Promise<CommandResult<{ shutdown: ShutdownState | null }>> {
+    if (!(await this.sessionFor(input.sessionToken, input.now))) return { error: "bad_token", status: 401 };
+    this.ctx.storage.sql.exec(
+      "UPDATE device_command SET cancelled_at_ms = ? WHERE device_id = ? AND kind = 'shutdown' AND cancelled_at_ms IS NULL AND delivered_at_ms IS NULL",
+      input.now,
+      input.deviceId,
+    );
+    return { shutdown: this.latestShutdown(input.deviceId) };
+  }
+
+  /** A device's own pending orders. Also notes that the device is running. */
+  async pendingCommands(input: { deviceToken: string; pathDeviceId: string; now: number }): Promise<CommandResult<{ commands: Array<{ command_id: string; kind: string; requested_at_ms: number }> }>> {
+    const device = await this.liveDevice(input.deviceToken, input.pathDeviceId);
+    if ("error" in device) return device;
+    const seen = this.ctx.storage.sql
+      .exec<{ last_seen_at_ms: number | null }>("SELECT last_seen_at_ms FROM device WHERE device_id = ?", device.deviceId)
+      .toArray()[0];
+    if (!seen?.last_seen_at_ms || input.now - seen.last_seen_at_ms >= SEEN_EVERY_MS) {
+      this.ctx.storage.sql.exec("UPDATE device SET last_seen_at_ms = ? WHERE device_id = ?", input.now, device.deviceId);
+    }
+    const commands = this.ctx.storage.sql
+      .exec<{ command_id: string; kind: string; requested_at_ms: number }>(
+        "SELECT command_id, kind, requested_at_ms FROM device_command WHERE device_id = ? AND cancelled_at_ms IS NULL AND delivered_at_ms IS NULL ORDER BY requested_at_ms",
+        device.deviceId,
+      )
+      .toArray();
+    return { commands };
+  }
+
+  /**
+   * The device says it got an order, before acting on it, so a restart cannot run it twice.
+   * `go` is false when the order was cancelled first; the device must then do nothing.
+   * A later "failed:..." report on a delivered order records why acting on it failed.
+   */
+  async ackCommand(input: { deviceToken: string; pathDeviceId: string; commandId: string; result: string; now: number }): Promise<CommandResult<{ go: boolean }>> {
+    const device = await this.liveDevice(input.deviceToken, input.pathDeviceId);
+    if ("error" in device) return device;
+    if (!COMMAND_RESULT.test(input.result)) return { error: "bad_result", status: 422 };
+    const row = this.ctx.storage.sql
+      .exec<{ cancelled_at_ms: number | null; delivered_at_ms: number | null }>(
+        "SELECT cancelled_at_ms, delivered_at_ms FROM device_command WHERE command_id = ? AND device_id = ?",
+        input.commandId,
+        device.deviceId,
+      )
+      .toArray()[0];
+    if (!row) return { error: "no_such_command", status: 404 };
+    if (row.cancelled_at_ms !== null) return { go: false };
+    if (row.delivered_at_ms === null) {
+      if (input.result !== "delivered") return { error: "bad_result", status: 422 };
+      this.ctx.storage.sql.exec("UPDATE device_command SET delivered_at_ms = ?, result = 'delivered' WHERE command_id = ?", input.now, input.commandId);
+      return { go: true };
+    }
+    // Already delivered: only a failure report may follow, and the device must not act again.
+    if (input.result !== "delivered") {
+      this.ctx.storage.sql.exec("UPDATE device_command SET result = ? WHERE command_id = ?", input.result, input.commandId);
+    }
+    return { go: false };
+  }
+
+  private async liveDevice(token: string, pathDeviceId: string): Promise<{ deviceId: string } | { error: string; status: number }> {
+    const device = await this.deviceFor(token);
+    if (!device) return { error: "bad_token", status: 401 };
+    if (device.revoked_at_ms !== null) return { error: "revoked", status: 401 };
+    if (device.device_id !== pathDeviceId) return { error: "bad_device_id", status: 403 };
+    return { deviceId: device.device_id };
+  }
+
+  private latestShutdown(deviceId: string): ShutdownState | null {
+    const row = this.ctx.storage.sql
+      .exec<{ command_id: string; requested_at_ms: number; cancelled_at_ms: number | null; delivered_at_ms: number | null; result: string | null }>(
+        "SELECT command_id, requested_at_ms, cancelled_at_ms, delivered_at_ms, result FROM device_command WHERE device_id = ? AND kind = 'shutdown' ORDER BY requested_at_ms DESC, rowid DESC LIMIT 1",
+        deviceId,
+      )
+      .toArray()[0];
+    if (!row) return null;
+    const state: ShutdownState["state"] =
+      row.cancelled_at_ms !== null ? "cancelled"
+      : row.delivered_at_ms === null ? "pending"
+      : row.result?.startsWith("failed:") ? "failed"
+      : "delivered";
+    return {
+      command_id: row.command_id,
+      state,
+      requested_at_ms: row.requested_at_ms,
+      delivered_at_ms: row.delivered_at_ms,
+      result: row.result,
+    };
   }
 
   async setOwnLimit(input: { sessionToken: string; limitMs: number; now: number }): Promise<{ error: "bad_token" } | { budgetId: string; limitMs: number; effectiveAtMs: number }> {
@@ -612,8 +759,9 @@ export class UserAccount extends DurableObject<Env> {
         platform: string;
         created_at_ms: number;
         last_upload_at_ms: number | null;
+        last_seen_at_ms: number | null;
         revoked_at_ms: number | null;
-      }>("SELECT device_id, display_name, platform, created_at_ms, last_upload_at_ms, revoked_at_ms FROM device ORDER BY created_at_ms, device_id")
+      }>("SELECT device_id, display_name, platform, created_at_ms, last_upload_at_ms, last_seen_at_ms, revoked_at_ms FROM device ORDER BY created_at_ms, device_id")
       .toArray()
       .map((row) => ({
         device_id: row.device_id,
@@ -621,7 +769,9 @@ export class UserAccount extends DurableObject<Env> {
         platform: row.platform,
         created_at_ms: row.created_at_ms,
         last_upload_at_ms: row.last_upload_at_ms,
+        last_seen_at_ms: row.last_seen_at_ms,
         revoked: row.revoked_at_ms !== null,
+        shutdown: this.latestShutdown(row.device_id),
       }));
   }
 

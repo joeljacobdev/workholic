@@ -82,6 +82,25 @@ struct BreakSettingsPayload: Codable {
     }
 }
 
+/// One-time orders for this Mac, such as a shutdown asked for on the web.
+struct CommandsResponse: Decodable {
+    var commands: [DeviceCommand]
+}
+
+struct DeviceCommand: Decodable {
+    var commandId: String
+    var kind: String
+    enum CodingKeys: String, CodingKey {
+        case commandId = "command_id"
+        case kind
+    }
+}
+
+/// `go` is true only for the first "delivered" of an order nobody cancelled.
+struct CommandAck: Decodable {
+    var go: Bool
+}
+
 struct UploadAck: Decodable {
     var accepted: Int?
     var duplicateBatch: Bool?
@@ -157,6 +176,20 @@ struct ApiClient {
         request.setValue("Bearer \(deviceToken)", forHTTPHeaderField: "Authorization")
         request.httpBody = body
         return try await decode(request)
+    }
+
+    func commands(deviceToken: String, deviceId: String) async throws -> CommandsResponse {
+        try await send(path: "/v1/devices/\(deviceId)/commands", method: "GET", token: deviceToken, body: nil)
+    }
+
+    /// "delivered" before acting; "failed:<reason>" after, if acting failed.
+    func ackCommand(deviceToken: String, deviceId: String, commandId: String, result: String) async throws -> CommandAck {
+        try await send(
+            path: "/v1/devices/\(deviceId)/commands/\(commandId):ack",
+            method: "POST",
+            token: deviceToken,
+            body: ["result": result]
+        )
     }
 
     private func send<Response: Decodable>(path: String, method: String, token: String?, body: [String: String]?) async throws -> Response {

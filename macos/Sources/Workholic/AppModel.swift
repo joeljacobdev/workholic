@@ -13,6 +13,10 @@ final class AppModel {
     private var settingsTimer: Timer?
     /// A break push or pull is in flight, so a second one does not race it.
     private var breaksBusy = false
+    /// A check for web orders is in flight.
+    private var commandsBusy = false
+    /// A shutdown from the web is under way; nothing more is asked of the server.
+    private var shuttingDown = false
     private var lastSample: MachineSample?
     /// Something that needs the user: a failed login or sync. Nil when all is well.
     private(set) var problem: String?
@@ -471,7 +475,56 @@ final class AppModel {
     }
 
     private func schedulePull() {
-        Task { await self.pullSettings() }
+        Task {
+            await self.pullSettings()
+            await self.checkCommands()
+        }
+    }
+
+    /// Orders from the web for this Mac, read with its device token, so only this Mac's own.
+    /// Each is acknowledged before it runs: a restart cannot run it twice, and one cancelled
+    /// in the meantime comes back with `go` false and is dropped.
+    private func checkCommands() async {
+        guard !commandsBusy, !shuttingDown, let device = TokenStore.get("device") else { return }
+        commandsBusy = true
+        defer { commandsBusy = false }
+        let api = ApiClient(baseURL: ApiOrigin.baseURL)
+        // A failed check is retried in seconds. It never signs out: that is the session's job.
+        guard let pending = try? await api.commands(deviceToken: device, deviceId: deviceId) else { return }
+        for command in pending.commands where command.kind == "shutdown" {
+            guard let ack = try? await api.ackCommand(
+                deviceToken: device, deviceId: deviceId, commandId: command.commandId, result: "delivered"
+            ), ack.go else { continue }
+            shutDown(api: api, deviceToken: device, commandId: command.commandId)
+            return
+        }
+    }
+
+    /// Clears everything of Workholic's that would stand in the way: the covers, the locked pause's
+    /// kiosk mode that blocks shutting down, and the quit guard. Then asks macOS to shut down.
+    private func shutDown(api: ApiClient, deviceToken: String, commandId: String) {
+        shuttingDown = true
+        if reminder.activeBreak != nil {
+            reminder = skipBreak(state: reminder)
+        }
+        endBreak()
+        pausedSince = nil
+        peekTimer?.invalidate()
+        peekTimer = nil
+        pauseOverlay.hide()
+        power.release()
+        NSApp.presentationOptions = []
+        store.seal()
+        onChange?()
+        let status = SystemShutdown.request()
+        guard status != noErr else { return }
+        shuttingDown = false
+        let deviceId = deviceId
+        Task {
+            _ = try? await api.ackCommand(
+                deviceToken: deviceToken, deviceId: deviceId, commandId: commandId, result: "failed:apple-event \(status)"
+            )
+        }
     }
 
     /// The quick check: one small request for the limit and when breaks last changed.

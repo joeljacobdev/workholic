@@ -39,6 +39,16 @@ Pause is for stepping away while something keeps working, such as an agent. The 
 
 It is not the macOS lock screen. That screen cannot show Workholic's cover, and it brings the display's own sleep timers with it. The price is that this lock only guards the keyboard. Someone who can end the app another way, such as over SSH, gets past it. Holding the power button still restarts the Mac if anything ever goes wrong.
 
+## Shutting a Mac down from the web
+
+Settings › Devices has "Shut down…" beside each Mac. It is for a Mac left on and paused, such as one running an agent, that should not stay on. The order waits on the server until that Mac picks it up: within about 10 seconds if Workholic is running there, otherwise the next time it runs while signed in. Cancel withdraws it until then.
+
+- Only a login session (the web app, or a Mac's dashboard window) can ask for or cancel a shutdown. A Mac's device token cannot, so a token taken from one Mac cannot shut down another.
+- A Mac reads only its own orders, with its device token (`GET /v1/devices/{id}/commands`).
+- The Mac acknowledges an order before acting on it (`POST /v1/devices/{id}/commands/{command}:ack`). The server says go only to the first acknowledgement of an order nobody cancelled, so a restart cannot shut it down twice and a cancel that wins the race stops it.
+- To shut down, Workholic lifts its covers and the locked pause's kiosk mode, which would otherwise block it, and sends loginwindow the "shut down" Apple Event: the Apple menu's Shut Down without the dialog. Apps are asked to quit, so one with unsaved work can still stop it. If macOS refuses the request, the Mac reports it and the web shows that the shutdown did not go through.
+- Settings › Devices also shows when each Mac last checked in ("on now"), from those checks.
+
 ## Settings are one copy, the latest save wins
 
 Break settings and the daily limit live in the account. An edit on a Mac goes up at once. Every Mac, and the web Settings page while it is open, asks every 10 seconds whether anything changed. That check is one small request (`GET /v1/settings` returns the limit and when breaks last changed). The full break list is fetched only when that time moves.

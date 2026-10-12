@@ -5,7 +5,7 @@ import WebKit
 /// One page serves the browser, the phone, and the Mac, so the three cannot drift apart.
 /// The page shows a "This Mac" panel only here, and talks back through the `workholic` handler.
 @MainActor
-final class AppWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler, WKNavigationDelegate {
+final class AppWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler, WKNavigationDelegate, WKUIDelegate {
     /// What the page asked the Mac to do.
     enum Request {
         case openAtLogin(Bool)
@@ -71,6 +71,7 @@ final class AppWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler, WKNav
         let frame = NSRect(x: 0, y: 0, width: 1040, height: 760)
         let webView = WKWebView(frame: frame, configuration: configuration)
         webView.navigationDelegate = self
+        webView.uiDelegate = self
         webView.autoresizingMask = [.width, .height]
 
         let window = NSWindow(
@@ -126,6 +127,23 @@ final class AppWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler, WKNav
         }
         decisionHandler(.cancel)
         NSWorkspace.shared.open(url)
+    }
+
+    /// Without this, the page's confirm() answers "no" at once, and "Shut down…" would do nothing here.
+    func webView(
+        _ webView: WKWebView,
+        runJavaScriptConfirmPanelWithMessage message: String,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping @MainActor @Sendable (Bool) -> Void
+    ) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        guard let window else { return completionHandler(alert.runModal() == .alertFirstButtonReturn) }
+        alert.beginSheetModal(for: window) { response in
+            completionHandler(response == .alertFirstButtonReturn)
+        }
     }
 
     private static func url(tab: String) -> URL {

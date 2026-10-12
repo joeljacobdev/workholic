@@ -261,6 +261,45 @@ try {
   const relogin = await request("/v1/login", { method: "POST", body: { username: "tester", password: "local-pass-2" } });
   assert.equal(relogin.status, 200);
 
+  // Remote shutdown: a session asks, only that device reads and acknowledges, once.
+  const web = relogin.body.session_token;
+  const shutdownPath = `/v1/devices/${deviceId}/shutdown`;
+  const commandsPath = `/v1/devices/${deviceId}/commands`;
+  const otherId = "1f0e2d3c-4b5a-4968-8776-655443322110";
+  assert.equal((await request(shutdownPath, { method: "POST", token: device })).status, 401, "a device token cannot ask for a shutdown");
+  assert.equal((await request(shutdownPath, { method: "POST" })).status, 401);
+  assert.equal((await request(`/v1/devices/${otherId}/shutdown`, { method: "POST", token: web })).status, 404);
+  assert.deepEqual((await request(commandsPath, { token: device })).body.commands, [], "nothing pending yet");
+  assert.equal((await request(commandsPath, { token: web })).status, 401, "a session cannot read a device's orders");
+  assert.equal((await request(`/v1/devices/${otherId}/commands`, { token: device })).status, 403, "a device reads only its own orders");
+
+  const asked = await request(shutdownPath, { method: "POST", token: web });
+  assert.equal(asked.status, 200);
+  assert.equal(asked.body.state, "pending");
+  const askedAgain = await request(shutdownPath, { method: "POST", token: web });
+  assert.equal(askedAgain.body.command_id, asked.body.command_id, "asking twice keeps one order");
+  const cancelled = await request(shutdownPath, { method: "DELETE", token: web });
+  assert.equal(cancelled.body.shutdown.state, "cancelled");
+  assert.deepEqual((await request(commandsPath, { token: device })).body.commands, [], "a cancelled order is not handed out");
+  const lateAck = await request(`${commandsPath}/${asked.body.command_id}:ack`, { method: "POST", token: device, body: { result: "delivered" } });
+  assert.equal(lateAck.body.go, false, "an order cancelled before the ack must not run");
+
+  const order = (await request(shutdownPath, { method: "POST", token: web })).body;
+  assert.notEqual(order.command_id, asked.body.command_id);
+  const pending = await request(commandsPath, { token: device });
+  assert.deepEqual(pending.body.commands.map((command) => [command.command_id, command.kind]), [[order.command_id, "shutdown"]]);
+  const ackPath = `${commandsPath}/${order.command_id}:ack`;
+  assert.equal((await request(ackPath, { method: "POST", token: device, body: { result: "rm -rf" } })).status, 422);
+  assert.equal((await request(ackPath, { method: "POST", token: device, body: { result: "delivered" } })).body.go, true);
+  assert.equal((await request(ackPath, { method: "POST", token: device, body: { result: "delivered" } })).body.go, false, "a second ack does not run it twice");
+  assert.deepEqual((await request(commandsPath, { token: device })).body.commands, [], "a delivered order is not handed out again");
+  assert.equal((await request(shutdownPath, { method: "DELETE", token: web })).body.shutdown.state, "delivered", "a delivered order cannot be called back");
+  await request(ackPath, { method: "POST", token: device, body: { result: "failed:-128" } });
+  const shown = (await request("/v1/stats", { token: web })).body.device_info.find((info) => info.device_id === deviceId);
+  assert.equal(shown.shutdown.state, "failed");
+  assert.equal(shown.shutdown.result, "failed:-128");
+  assert.ok(shown.last_seen_at_ms > 0, "polling marks the device as seen");
+
   const loggedOut = await request("/v1/logout", { method: "POST", token: relogin.body.session_token });
   assert.equal(loggedOut.status, 200);
   assert.equal((await request("/v1/settings", { token: relogin.body.session_token })).status, 401, "logout revokes the session");
