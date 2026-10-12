@@ -116,10 +116,10 @@ final class PauseOverlay: NSObject {
     }
 
     /// Brightens at once; one timer, pushed back by later input, dims again after a quiet spell.
-    /// Input is also the fallback for a desktop change the Space notification missed.
+    /// Input is also the fallback for a desktop or display change a notification missed.
     private func wake() {
         guard up, !prompting else { return }
-        if strandedOnOtherSpace { reshow(rebuilding: true) }
+        if strandedOnOtherSpace { reshow(rebuilding: true) } else if !fitsScreens { reshow() }
         lastInput = Date()
         backlight?.restore()
         if dimTimer == nil { scheduleDim(after: Self.wakeFor) }
@@ -139,9 +139,21 @@ final class PauseOverlay: NSObject {
         dimTimer = timer
     }
 
+    /// A monitor being plugged in sends several of these, and the screen list can trail the last one,
+    /// so the cover looks again a moment later. The break cover needs no second look: it checks every second.
     @objc private func screensChanged() {
         guard up else { return }
         reshow()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self, self.up, !self.fitsScreens else { return }
+            self.reshow()
+        }
+    }
+
+    /// One window per screen, each covering its screen exactly.
+    private var fitsScreens: Bool {
+        let screens = NSScreen.screens
+        return windows.count == screens.count && zip(windows, screens).allSatisfy { $0.frame.equalTo($1.frame) }
     }
 
     @objc private func spaceChanged() {
@@ -197,9 +209,7 @@ final class PauseOverlay: NSObject {
         let screens = NSScreen.screens
         let rebuild = rebuildNext
         rebuildNext = false
-        if !rebuild, windows.count == screens.count, zip(windows, screens).allSatisfy({ $0.frame.equalTo($1.frame) }) {
-            return
-        }
+        if !rebuild, fitsScreens { return }
         for window in windows {
             window.orderOut(nil)
         }
@@ -215,6 +225,7 @@ final class PauseOverlay: NSObject {
                 defer: false,
                 screen: screen
             )
+            window.cover(screen)
             window.level = .screenSaver
             window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
             window.isOpaque = true

@@ -195,6 +195,7 @@ final class BreakOverlay: NSObject {
                 defer: false,
                 screen: screen
             )
+            window.cover(screen)
             window.level = .screenSaver
             window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
             window.isOpaque = true
@@ -301,6 +302,12 @@ final class BreakOverlay: NSObject {
 /// Borderless windows refuse key status by default, which would leave Esc with nowhere to go.
 final class OverlayWindow: NSWindow {
     override var canBecomeKey: Bool { true }
+
+    /// Given a screen, the window initializer reads the content rect relative to that screen's corner,
+    /// so `screen.frame` lands a second display's cover off to the side. The frame is set outright instead.
+    func cover(_ screen: NSScreen) {
+        setFrame(screen.frame, display: false)
+    }
 }
 
 /// Calls back when the mouse moves, clicks, scrolls, or a key is pressed, whether or not Workholic

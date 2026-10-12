@@ -5,8 +5,11 @@ import CoreGraphics
 /// A black cover alone still leaves the panel lit; turning the backlight down makes it truly dim.
 /// It reaches built-in and Apple displays; other monitors are left alone and keep the black cover.
 /// The level before dimming is kept in UserDefaults, so a crash mid-cover is undone on the next launch.
+///
+/// Displays come and go while dimmed: one plugged in joins the dim, and one unplugged while dimmed
+/// gets its level back when it returns, instead of staying dark for good.
 @MainActor
-final class Backlight {
+final class Backlight: NSObject {
     private typealias GetFn = @convention(c) (CGDirectDisplayID, UnsafeMutablePointer<Float>) -> Int32
     private typealias SetFn = @convention(c) (CGDirectDisplayID, Float) -> Int32
 
@@ -23,13 +26,24 @@ final class Backlight {
     /// The levels a restore ramp still on its way up is heading for. A dim that starts mid-ramp
     /// saves these, not the half-restored level, or the screen would never come all the way back.
     private var restoring: [CGDirectDisplayID: Float] = [:]
+    /// Displays that were unplugged or asleep while dimmed, to the level they get back when they return.
+    private var owed: [CGDirectDisplayID: Float] = [:]
 
-    init() {
+    override init() {
         let handle = dlopen("/System/Library/PrivateFrameworks/DisplayServices.framework/DisplayServices", RTLD_NOW)
         get = handle.flatMap { dlsym($0, "DisplayServicesGetBrightness") }.map { unsafeBitCast($0, to: GetFn.self) }
         set = handle.flatMap { dlsym($0, "DisplayServicesSetBrightness") }.map { unsafeBitCast($0, to: SetFn.self) }
         let stored = UserDefaults.standard.dictionary(forKey: Self.savedKey) as? [String: Float] ?? [:]
         saved = Dictionary(uniqueKeysWithValues: stored.compactMap { key, value in UInt32(key).map { ($0, value) } })
+        super.init()
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(displaysChanged),
+            name: NSApplication.didChangeScreenParametersNotification, object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(displaysChanged),
+            name: NSWorkspace.screensDidWakeNotification, object: nil
+        )
     }
 
     var isDimmed: Bool { !saved.isEmpty }
@@ -46,7 +60,7 @@ final class Backlight {
         for display in onlineDisplays() {
             var level: Float = -1
             guard get(display, &level) == 0, level >= 0 else { continue }
-            let before = restoring[display] ?? level
+            let before = owed.removeValue(forKey: display) ?? restoring[display] ?? level
             saved[display] = before
             targets[display] = (level, min(before, Self.dimLevel))
         }
@@ -58,10 +72,14 @@ final class Backlight {
     func restore(animated: Bool = true) {
         guard isDimmed, let get else { return }
         var targets: [CGDirectDisplayID: (from: Float, to: Float)] = [:]
+        let online = Set(onlineDisplays())
         for (display, level) in saved {
-            var now: Float = level
-            _ = get(display, &now)
-            targets[display] = (now, level)
+            var now: Float = -1
+            if online.contains(display), get(display, &now) == 0, now >= 0 {
+                targets[display] = (now, level)
+            } else {
+                owed[display] = level
+            }
         }
         saved = [:]
         persist()
@@ -74,6 +92,32 @@ final class Backlight {
             restoring = [:]
             apply(targets, fraction: 1)
         }
+    }
+
+    /// A display plugged in while dimmed is dimmed too; one that woke up bright again goes back down;
+    /// one owed its level gets it back. A ramp already running is not cut short: these jump instead.
+    @objc private func displaysChanged() {
+        guard let get else { return }
+        var targets: [CGDirectDisplayID: (from: Float, to: Float)] = [:]
+        for display in onlineDisplays() {
+            var level: Float = -1
+            guard get(display, &level) == 0, level >= 0 else { continue }
+            if isDimmed {
+                if let before = saved[display] {
+                    let low = min(before, Self.dimLevel)
+                    if ramp == nil, level > low + 0.01 { targets[display] = (level, low) }
+                } else {
+                    let before = owed.removeValue(forKey: display) ?? level
+                    saved[display] = before
+                    targets[display] = (level, min(before, Self.dimLevel))
+                }
+            } else if let before = owed.removeValue(forKey: display) {
+                targets[display] = (level, before)
+            }
+        }
+        guard !targets.isEmpty else { return }
+        persist()
+        if ramp == nil { animate(targets) } else { apply(targets, fraction: 1) }
     }
 
     /// The ramp runs in the common run loop mode, so an open menu does not stall it halfway.
@@ -112,7 +156,8 @@ final class Backlight {
     }
 
     private func persist() {
-        let stored = Dictionary(uniqueKeysWithValues: saved.map { (String($0.key), $0.value) })
+        let levels = owed.merging(saved) { _, dimmed in dimmed }
+        let stored = Dictionary(uniqueKeysWithValues: levels.map { (String($0.key), $0.value) })
         if stored.isEmpty { UserDefaults.standard.removeObject(forKey: Self.savedKey) }
         else { UserDefaults.standard.set(stored, forKey: Self.savedKey) }
     }
