@@ -300,6 +300,20 @@ try {
   assert.equal(shown.shutdown.result, "failed:-128");
   assert.ok(shown.last_seen_at_ms > 0, "polling marks the device as seen");
 
+  // Scheduled shutdown: a session sets it per device, and that device reads it with its orders.
+  const schedulePath = `/v1/devices/${deviceId}/shutdown-schedule`;
+  const schedule = { after: "22:00", after_limit: true, command: "last-call-end" };
+  assert.equal(shown.shutdown_schedule, null, "no schedule until one is set");
+  assert.equal((await request(schedulePath, { method: "PUT", token: device, body: { schedule } })).status, 401, "a device token cannot set a schedule");
+  assert.equal((await request(schedulePath, { method: "PUT", token: web, body: { schedule: { after: "22:00", command: "../x" } } })).status, 422);
+  assert.equal((await request(`/v1/devices/${otherId}/shutdown-schedule`, { method: "PUT", token: web, body: { schedule } })).status, 404);
+  assert.deepEqual((await request(schedulePath, { method: "PUT", token: web, body: { schedule } })).body.shutdown_schedule, schedule);
+  assert.deepEqual((await request(commandsPath, { token: device })).body.shutdown_schedule, schedule, "the Mac reads its schedule");
+  const listed = (await request("/v1/stats", { token: web })).body.device_info.find((info) => info.device_id === deviceId);
+  assert.deepEqual(listed.shutdown_schedule, schedule);
+  assert.equal((await request(schedulePath, { method: "PUT", token: web, body: { schedule: null } })).body.shutdown_schedule, null);
+  assert.equal((await request(commandsPath, { token: device })).body.shutdown_schedule, null, "turned off");
+
   const loggedOut = await request("/v1/logout", { method: "POST", token: relogin.body.session_token });
   assert.equal(loggedOut.status, 200);
   assert.equal((await request("/v1/settings", { token: relogin.body.session_token })).status, 401, "logout revokes the session");

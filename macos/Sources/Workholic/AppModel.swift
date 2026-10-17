@@ -59,6 +59,16 @@ final class AppModel {
     /// Runs during "Unpause for 5 minutes", then brings the pause cover back.
     private var peekTimer: Timer?
     var onChange: (() -> Void)?
+    /// This Mac's daily scheduled shutdown, as last heard from the account.
+    private var shutdownRule = ShutdownSchedule.load()
+    /// Where today's scheduled shutdown stands. Only the done day outlives a restart.
+    private var shutdownWatch = ShutdownWatch(doneDay: UserDefaults.standard.string(forKey: AppModel.shutdownDoneKey))
+    private let shutdownWarning = ShutdownWarning()
+    /// The command's last run. `time` is nil when it failed or printed no time.
+    private var shutdownCommandRan: (at: Date, command: String, time: Date?)?
+    private var shutdownCommandBusy = false
+    /// The menu's line about the scheduled shutdown. Nil when there is no schedule.
+    private var shutdownNote: String?
 
     private let defaults = UserDefaults.standard
 
@@ -70,6 +80,7 @@ final class AppModel {
     private static let breaksEditedAtKey = "breakPlanEditedAt"
     private static let settingsEverySeconds: TimeInterval = 10
     private static let scheduledHandledKey = "scheduledHandled"
+    private static let shutdownDoneKey = "scheduledShutdownDoneDay"
 
     init(store: LocalStore) {
         self.store = store
@@ -85,6 +96,8 @@ final class AppModel {
         pauseOverlay.backlight = backlight
         dayEditor.onSave = { [weak self] saved in self?.replaceDayPlan(saved) }
         appWindow.onRequest = { [weak self] request in self?.handle(request) }
+        shutdownWarning.onCancel = { [weak self] in self?.noteShutdown("Scheduled shutdown cancelled for today.") }
+        shutdownWarning.onShutDown = { [weak self] in self?.runScheduledShutdown() }
         store.setBootId(bootIdentifier())
         store.closeOpenAtLaunch()
         let center = NSWorkspace.shared.notificationCenter
@@ -195,6 +208,8 @@ final class AppModel {
         defaults.removeObject(forKey: Self.breaksDirtyKey)
         defaults.removeObject(forKey: Self.breaksSyncedAtKey)
         defaults.removeObject(forKey: Self.breaksEditedAtKey)
+        shutdownRule = nil
+        ShutdownSchedule.save(nil)
         ceilingMs = nil
         syncedCreditedMs = nil
         problem = nil
@@ -260,6 +275,7 @@ final class AppModel {
             lines.append("Today: \(formatDuration(usage.usedMs))")
         }
         if let line = breakLine() { lines.append(line) }
+        if let shutdownNote { lines.append(shutdownNote) }
         if !signedIn {
             lines.append("Not logged in. Time stays on this Mac.")
         } else if let problem {
@@ -497,6 +513,10 @@ final class AppModel {
         let api = ApiClient(baseURL: ApiOrigin.baseURL)
         // A failed check is retried in seconds. It never signs out: that is the session's job.
         guard let pending = try? await api.commands(deviceToken: device, deviceId: deviceId) else { return }
+        if pending.shutdownSchedule != shutdownRule {
+            shutdownRule = pending.shutdownSchedule
+            ShutdownSchedule.save(shutdownRule)
+        }
         for command in pending.commands where command.kind == "shutdown" {
             guard let ack = try? await api.ackCommand(
                 deviceToken: device, deviceId: deviceId, commandId: command.commandId, result: "delivered"
@@ -509,6 +529,18 @@ final class AppModel {
     /// Clears everything of Workholic's that would stand in the way: the covers, the locked pause's
     /// kiosk mode that blocks shutting down, and the quit guard. Then asks macOS to shut down.
     private func shutDown(api: ApiClient, deviceToken: String, commandId: String) {
+        let status = clearAndShutDown()
+        guard status != noErr else { return }
+        let deviceId = deviceId
+        Task {
+            _ = try? await api.ackCommand(
+                deviceToken: deviceToken, deviceId: deviceId, commandId: commandId, result: "failed:apple-event \(status)"
+            )
+        }
+    }
+
+    /// The Apple Event's status. On a refusal Workholic carries on as before.
+    private func clearAndShutDown() -> OSStatus {
         shuttingDown = true
         if reminder.activeBreak != nil {
             reminder = skipBreak(state: reminder)
@@ -523,14 +555,8 @@ final class AppModel {
         store.seal()
         onChange?()
         let status = SystemShutdown.request()
-        guard status != noErr else { return }
-        shuttingDown = false
-        let deviceId = deviceId
-        Task {
-            _ = try? await api.ackCommand(
-                deviceToken: deviceToken, deviceId: deviceId, commandId: commandId, result: "failed:apple-event \(status)"
-            )
-        }
+        if status != noErr { shuttingDown = false }
+        return status
     }
 
     /// The quick check: one small request for the limit and when breaks last changed.
@@ -701,7 +727,138 @@ final class AppModel {
         deliver(notices)
         openScheduled(now: now, displayAwake: sample.displayAwake)
         if dayPlanDeferred { promptDayPlanIfNeeded() }
+        checkScheduledShutdown(now: now)
         onChange?()
+    }
+
+    /// Anything unclear means no shutdown: a rule that fails the checks, a failed script, output that is
+    /// not a time, or a total not known yet. A call holds it. When everything holds, a 60-second warning can cancel it.
+    private func checkScheduledShutdown(now: Date) {
+        guard !shuttingDown, !shutdownWarning.isVisible else { return }
+        guard let rule = shutdownRule else {
+            shutdownNote = nil
+            return
+        }
+        guard validShutdownRule(rule) else {
+            shutdownNote = "Scheduled shutdown is off: its settings do not read."
+            return
+        }
+        var over = false
+        if rule.afterLimit {
+            let usage = todayUsage(now: now)
+            guard let ceiling = usage.ceilingMs else {
+                shutdownNote = "Scheduled shutdown waits for a daily limit."
+                return
+            }
+            // Signed in with the fixed limit, other devices count. Until the first sync that total is
+            // not known, and arming on a low local count could shut down right after launch.
+            if budgetMode == .fixed, signedIn, syncedCreditedMs == nil {
+                shutdownNote = "Scheduled shutdown waits for today's total."
+                return
+            }
+            over = usage.usedMs >= ceiling
+        }
+        let day = civilDay(now)
+        let gate = shutdownGateOpen(rule, msIntoDay: msIntoDay(now), overLimit: over)
+        let (watch, status) = shutdownStep(shutdownWatch, day: day, gateOpen: gate)
+        shutdownWatch = watch
+        switch status {
+        case .waiting:
+            shutdownNote = "Shuts down \(describeShutdown(rule))."
+        case .missed:
+            shutdownNote = "No scheduled shutdown today: it was already due when Workholic started."
+        case .done:
+            if shutdownNote == nil || shutdownNote?.hasPrefix("Shuts down") == true {
+                shutdownNote = "Scheduled shutdown done for today."
+            }
+        case .ready:
+            if onCall {
+                shutdownNote = "Scheduled shutdown waits until the call ends."
+                return
+            }
+            guard let command = rule.command else {
+                warnShutdown(day: day, reason: "Scheduled \(describeShutdown(rule)).")
+                return
+            }
+            askShutdownCommand(command, rule: rule, day: day, now: now)
+        }
+    }
+
+    /// The script says when shutting down is fine; the later of its time and the set time wins, since
+    /// the gate already held the set time. A printed time that has passed is trusted only from a run
+    /// in the last minute, so the warning always rests on a fresh answer.
+    private func askShutdownCommand(_ command: String, rule: ShutdownRule, day: String, now: Date) {
+        if let ran = shutdownCommandRan, ran.command == command, now.timeIntervalSince(ran.at) < 300 {
+            guard let time = ran.time else { return }
+            if time > now {
+                shutdownNote = "Shuts down after \(clockText(time)), from \(command)."
+                return
+            }
+            if now.timeIntervalSince(ran.at) < 60 {
+                warnShutdown(day: day, reason: "Scheduled \(describeShutdown(rule)); \(command) said after \(clockText(time)).")
+                return
+            }
+        }
+        guard !shutdownCommandBusy else { return }
+        shutdownCommandBusy = true
+        shutdownNote = "Asking \(command) when to shut down…"
+        Task {
+            let result = await runShutdownCommand(command)
+            let ranAt = Date()
+            self.shutdownCommandBusy = false
+            switch result {
+            case .failed(let why):
+                self.shutdownCommandRan = (ranAt, command, nil)
+                self.shutdownNote = "Shutdown script \(why). Not shutting down; trying again in 5 minutes."
+            case .printed(let text):
+                let time = readShutdownTime(text, now: ranAt)
+                self.shutdownCommandRan = (ranAt, command, time)
+                if time == nil {
+                    self.shutdownNote = "\(command) printed no time. Not shutting down; trying again in 5 minutes."
+                } else {
+                    // Everything is looked at again: the day, the schedule, or a call may have changed meanwhile.
+                    self.checkScheduledShutdown(now: Date())
+                }
+            }
+            self.onChange?()
+        }
+    }
+
+    /// The day is done once warned, so a cancel or a refusal is not tried again until tomorrow.
+    private func warnShutdown(day: String, reason: String) {
+        shutdownWatch.doneDay = day
+        defaults.set(day, forKey: Self.shutdownDoneKey)
+        shutdownNote = "Scheduled shutdown in 60 seconds."
+        shutdownWarning.show(seconds: 60, reason: reason)
+    }
+
+    private func runScheduledShutdown() {
+        // A call that started during the countdown wins.
+        if callInProgress() {
+            noteShutdown("Scheduled shutdown skipped today: a call was going.")
+            return
+        }
+        let status = clearAndShutDown()
+        noteShutdown(status == noErr ? "Shutting down…" : "Scheduled shutdown did not go through (macOS said \(status)).")
+    }
+
+    private func noteShutdown(_ note: String) {
+        shutdownNote = note
+        onChange?()
+    }
+
+    private func describeShutdown(_ rule: ShutdownRule) -> String {
+        var parts = ["after \(rule.after)"]
+        if rule.afterLimit { parts.append("past today's limit") }
+        if let command = rule.command { parts.append("not before \(command)'s time") }
+        return parts.joined(separator: ", ")
+    }
+
+    private func clockText(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.timeStyle = .short
+        formatter.dateStyle = Calendar.current.isDateInToday(date) ? .none : .short
+        return formatter.string(from: date)
     }
 
     /// Only asked when overtime pauses are on, since it reads today's total.

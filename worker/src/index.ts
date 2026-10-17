@@ -82,6 +82,8 @@ export default {
       const shutdown = /^\/v1\/devices\/([0-9a-f-]{36})\/shutdown$/.exec(url.pathname);
       if (request.method === "POST" && shutdown) return await requestShutdown(request, env, shutdown[1]);
       if (request.method === "DELETE" && shutdown) return await cancelShutdown(request, env, shutdown[1]);
+      const schedule = /^\/v1\/devices\/([0-9a-f-]{36})\/shutdown-schedule$/.exec(url.pathname);
+      if (request.method === "PUT" && schedule) return await putShutdownSchedule(request, env, schedule[1]);
       const commands = /^\/v1\/devices\/([0-9a-f-]{36})\/commands$/.exec(url.pathname);
       if (request.method === "GET" && commands) return await pendingCommands(request, env, commands[1]);
       const ack = /^\/v1\/devices\/([0-9a-f-]{36})\/commands\/([0-9a-f-]{36}):ack$/.exec(url.pathname);
@@ -381,6 +383,21 @@ async function cancelShutdown(request: Request, env: Env, deviceId: string): Pro
   const userId = await userIdForToken(env, token);
   if (!userId) return json({ error: "bad_token" }, 401);
   return commandResponse(await account(env, userId).cancelShutdown({ sessionToken: token, deviceId, now: Date.now() }));
+}
+
+/** Body `{ "schedule": { after, after_limit, command } }`, or `{ "schedule": null }` to turn it off. */
+async function putShutdownSchedule(request: Request, env: Env, deviceId: string): Promise<Response> {
+  const token = bearer(request);
+  if (!token) return json({ error: "bad_token" }, 401);
+  const userId = await userIdForToken(env, token);
+  if (!userId) return json({ error: "bad_token" }, 401);
+  const body = await readJson(request);
+  if (!body.ok) return body.response;
+  const record = asRecord(body.value);
+  if (!record || !("schedule" in record)) return json({ error: "bad_schedule" }, 422);
+  return commandResponse(
+    await account(env, userId).setShutdownSchedule({ sessionToken: token, deviceId, schedule: record.schedule, now: Date.now() }),
+  );
 }
 
 // A Mac reads and acknowledges only its own orders, with its device token.

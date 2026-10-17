@@ -57,6 +57,35 @@ Settings › Devices has "Shut down…" beside each Mac. It is for a Mac left on
 - To shut down, Workholic lifts its covers and the locked pause's kiosk mode, which would otherwise block it, and sends loginwindow the "shut down" Apple Event: the Apple menu's Shut Down without the dialog. Apps are asked to quit, so one with unsaved work can still stop it. If macOS refuses the request, the Mac reports it and the web shows that the shutdown did not go through.
 - Settings › Devices also shows when each Mac last checked in ("on now"), from those checks.
 
+## Scheduled shutdown
+
+Each Mac can shut itself down daily. It is set per device in Settings › Devices, stored in the account, and reaches the Mac with its order check every 10 seconds (`GET /v1/devices/{id}/commands` returns `shutdown_schedule`). The Mac keeps the last one it heard, so it holds offline; logging out clears it. Setting it takes a login session (`PUT /v1/devices/{id}/shutdown-schedule`), like a shutdown.
+
+```json
+{ "after": "22:00", "after_limit": true, "command": "last-call-end" }
+```
+
+- `after` (required): the Mac's own local time. Not before then.
+- `after_limit` (optional): also not before today's limit is used up.
+- `command` (optional): also not before the time a script prints. Whichever time is later wins.
+
+`command` is only a script's file name. The Mac runs it from `~/Library/Application Support/tech.joeljacob.workholic/commands/`, through `zsh -l` so PATH matches Terminal's, with a 30-second limit. The script lives only on that Mac, with whatever credentials it needs (a calendar, say). The account can pick among scripts already there but cannot send the Mac code. The script prints when shutting down is fine, such as when the last call accepted for today ends, as either:
+
+- `HH:MM`, on today's date in this Mac's time zone, or
+- ISO 8601 with a zone: `2026-10-17T21:30:00-07:00` or `2026-10-18T04:30:00Z`.
+
+The script runs only once the time and limit parts hold, then again every 5 minutes until its time passes. A time that has passed is acted on only from a run in the last minute.
+
+It is built so that it never shuts down by surprise:
+
+- Anything unclear means no shutdown: a schedule that fails the Mac's own checks, a script that is missing, not executable, fails, times out, or prints anything but a time, or a limit or today's total not known yet. The menu says why.
+- It fires only when Workholic saw it "not yet due" earlier the same day. Starting the Mac after the time does not shut it down. (A Mac that slept through the time does get the warning when it wakes.)
+- A call (microphone or camera in use) holds it until the call ends.
+- A 60-second window over everything, the break and pause covers included, counts down with Cancel (Return or Esc) and Shut Down Now. A call that starts during the countdown also stops it.
+- Once warned, the day is done. A cancel, or an app that refuses to quit, is not tried again until tomorrow.
+
+The shutdown itself is the same as one from the web: covers lifted, then the "shut down" Apple Event.
+
 ## Settings are one copy, the latest save wins
 
 Break settings and the daily limit live in the account. An edit on a Mac goes up at once. Every Mac, and the web Settings page while it is open, asks every 10 seconds whether anything changed. That check is one small request (`GET /v1/settings` returns the limit and when breaks last changed). The full break list is fetched only when that time moves.

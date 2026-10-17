@@ -248,6 +248,12 @@ h2 + .row { border-top: 0; }
 .device-list .meta { grid-column: 2; font-size: 13px; color: var(--muted); }
 .device-list .actions { grid-column: 2; display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; font-size: 13px; color: var(--muted); }
 .device-list .actions:empty { display: none; }
+.device-list .schedule { grid-column: 2; display: grid; gap: 6px; margin-top: 6px; font-size: 13px; color: var(--muted); }
+.device-list .schedule:empty { display: none; }
+.device-list .schedule .line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.device-list .schedule input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--brand); }
+.device-list .schedule input[type="time"] { width: auto; padding: 4px 6px; }
+.device-list .schedule input[type="text"] { width: 200px; max-width: 100%; padding: 4px 6px; }
 button.link.warn { color: var(--over); }
 
 /* Breaks */

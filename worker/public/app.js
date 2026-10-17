@@ -675,6 +675,66 @@ function shutdownLine(entry) {
   return line;
 }
 
+/**
+ * The Mac's daily shutdown: after a time, optionally once past the limit, and not before the time a
+ * script on that Mac prints. Only the script's name is stored; the Mac runs it from its own folder.
+ */
+function scheduleForm(entry) {
+  const form = el("form", "schedule");
+  if (entry.revoked || entry.platform !== "macos") return form;
+  const saved = entry.shutdown_schedule;
+  const on = el("input");
+  on.type = "checkbox";
+  on.checked = Boolean(saved);
+  const after = el("input");
+  after.type = "time";
+  after.value = saved?.after ?? "22:00";
+  const limit = el("input");
+  limit.type = "checkbox";
+  limit.checked = saved?.after_limit ?? false;
+  const command = el("input");
+  command.type = "text";
+  command.placeholder = "script name (optional)";
+  command.value = saved?.command ?? "";
+  command.spellcheck = false;
+  const status = el("span", "muted");
+  const save = el("button", "link", "Save");
+  save.type = "submit";
+
+  const daily = el("label", "line");
+  daily.append(on, " Shut down daily after ", after);
+  const past = el("label", "line");
+  past.append(limit, " and only once past today’s limit");
+  const script = el("label", "line");
+  script.append("Not before the time printed by ", command);
+  const actions = el("span", "line");
+  actions.append(save, status);
+  const refresh = () => {
+    for (const input of [after, limit, command]) input.disabled = !on.checked;
+  };
+  on.addEventListener("change", refresh);
+  refresh();
+  form.append(daily, past, script, actions);
+  form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const schedule = on.checked ? { after: after.value, after_limit: limit.checked, command: command.value.trim() || null } : null;
+    save.disabled = true;
+    status.textContent = "";
+    try {
+      await api(`/v1/devices/${entry.device_id}/shutdown-schedule`, { method: "PUT", body: { schedule } });
+      status.textContent = schedule ? "Saved. The Mac picks it up within seconds." : "Turned off.";
+    } catch (error) {
+      if (error instanceof AuthError) return handleFailure(error);
+      status.textContent = error.message === "bad_schedule"
+        ? "Use a time, and a script name of letters, digits, dots, dashes, or underscores."
+        : `Could not save (${error.message}).`;
+    } finally {
+      save.disabled = false;
+    }
+  });
+  return form;
+}
+
 async function changeShutdown(entry, method, button) {
   button.disabled = true;
   try {
@@ -698,7 +758,7 @@ async function loadDevices() {
     const meta = [entry.platform === "macos" ? "Mac" : entry.platform];
     if (entry.revoked) meta.push("signed out");
     else meta.push(...[presence(entry.last_seen_at_ms), ago(entry.last_upload_at_ms)].filter(Boolean));
-    item.append(swatch(device(entry.device_id).color), el("span", "", entry.display_name), el("span", "meta", meta.join(", ")), shutdownLine(entry));
+    item.append(swatch(device(entry.device_id).color), el("span", "", entry.display_name), el("span", "meta", meta.join(", ")), shutdownLine(entry), scheduleForm(entry));
     list.append(item);
   }
   $("settings-devices-empty").hidden = info.length > 0;

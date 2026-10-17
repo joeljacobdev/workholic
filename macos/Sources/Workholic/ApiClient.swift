@@ -1,4 +1,5 @@
 import Foundation
+import WorkholicCore
 
 struct LoginResponse: Decodable {
     var sessionToken: String
@@ -82,9 +83,23 @@ struct BreakSettingsPayload: Codable {
     }
 }
 
-/// One-time orders for this Mac, such as a shutdown asked for on the web.
+/// One-time orders for this Mac, such as a shutdown asked for on the web, and its daily scheduled shutdown.
 struct CommandsResponse: Decodable {
     var commands: [DeviceCommand]
+    /// Nil when none is set, when an older server leaves it out, or when it does not read:
+    /// a bad schedule must not stop the orders from being read.
+    var shutdownSchedule: ShutdownRule?
+
+    enum CodingKeys: String, CodingKey {
+        case commands
+        case shutdownSchedule = "shutdown_schedule"
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        commands = try values.decode([DeviceCommand].self, forKey: .commands)
+        shutdownSchedule = (try? values.decodeIfPresent(ShutdownRule.self, forKey: .shutdownSchedule)) ?? nil
+    }
 }
 
 struct DeviceCommand: Decodable {
