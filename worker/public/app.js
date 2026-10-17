@@ -675,64 +675,111 @@ function shutdownLine(entry) {
   return line;
 }
 
+/** One line for the collapsed shutdown row. */
+function scheduleSummary(schedule) {
+  if (!schedule) return "Off";
+  let text = schedule.when === "limit"
+    ? schedule.delay_minutes > 0 ? `${formatDuration(schedule.delay_minutes * 60_000)} after today’s limit` : "When today’s limit is crossed"
+    : `After ${schedule.after}`;
+  if (schedule.command) text += `, or later if ${schedule.command} says so`;
+  return text;
+}
+
 /**
- * The Mac's daily shutdown: after a time, optionally once past the limit, and not before the time a
- * script on that Mac prints. Only the script's name is stored; the Mac runs it from its own folder.
+ * The Mac's daily shutdown, collapsed to a summary until opened. It comes due at a clock time or a
+ * delay after the limit; a script on that Mac can push it later, never earlier. Only the script's
+ * name is stored; the Mac runs it from its own folder.
  */
 function scheduleForm(entry) {
-  const form = el("form", "schedule");
-  if (entry.revoked || entry.platform !== "macos") return form;
+  const box = el("details", "schedule");
+  if (entry.revoked || entry.platform !== "macos") return box;
   const saved = entry.shutdown_schedule;
-  const on = el("input");
-  on.type = "checkbox";
-  on.checked = Boolean(saved);
+  const summary = el("summary");
+  const summaryValue = el("span", "value", scheduleSummary(saved));
+  summary.append(el("span", "", "Daily shutdown: "), summaryValue);
+
+  const mode = el("select");
+  for (const [value, label] of [["off", "Off"], ["time", "At a set time"], ["limit", "When today’s limit is crossed"]]) {
+    const option = el("option", "", label);
+    option.value = value;
+    mode.append(option);
+  }
+  mode.value = saved?.when ?? "off";
   const after = el("input");
   after.type = "time";
   after.value = saved?.after ?? "22:00";
-  const limit = el("input");
-  limit.type = "checkbox";
-  limit.checked = saved?.after_limit ?? false;
+  const delay = el("input");
+  delay.type = "number";
+  delay.min = "0";
+  delay.max = "720";
+  delay.step = "5";
+  delay.inputMode = "numeric";
+  delay.value = String(saved?.delay_minutes ?? 0);
   const command = el("input");
   command.type = "text";
-  command.placeholder = "script name (optional)";
+  command.placeholder = "script file name";
   command.value = saved?.command ?? "";
   command.spellcheck = false;
+  command.autocapitalize = "off";
+
+  const modeRow = el("label", "field");
+  modeRow.append(el("span", "", "Shut down"), mode);
+  const timeRow = el("label", "field");
+  timeRow.append(el("span", "", "After"), after);
+  const delayRow = el("label", "field");
+  delayRow.append(el("span", "", "Wait"), delay, el("span", "", "minutes after crossing"));
+  const scriptRow = el("label", "field");
+  scriptRow.append(el("span", "", "Script"), command);
+  const hint = el("p", "hint");
+  hint.append(
+    "Optional. On this Mac, put an executable script in ",
+    el("code", "", "~/Library/Application Support/tech.joeljacob.workholic/commands/"),
+    " and enter its file name. It prints one time, ",
+    el("code", "", "21:30"),
+    " or ",
+    el("code", "", "2026-10-17T21:30:00-07:00"),
+    "; if that is later, the Mac waits for it.",
+  );
   const status = el("span", "muted");
   const save = el("button", "link", "Save");
   save.type = "submit";
-
-  const daily = el("label", "line");
-  daily.append(on, " Shut down daily after ", after);
-  const past = el("label", "line");
-  past.append(limit, " and only once past today’s limit");
-  const script = el("label", "line");
-  script.append("Not before the time printed by ", command);
-  const actions = el("span", "line");
+  const actions = el("div", "line");
   actions.append(save, status);
+
+  const form = el("form");
+  form.append(modeRow, timeRow, delayRow, scriptRow, hint, actions);
   const refresh = () => {
-    for (const input of [after, limit, command]) input.disabled = !on.checked;
+    timeRow.hidden = mode.value !== "time";
+    delayRow.hidden = mode.value !== "limit";
+    scriptRow.hidden = hint.hidden = mode.value === "off";
   };
-  on.addEventListener("change", refresh);
+  mode.addEventListener("change", refresh);
   refresh();
-  form.append(daily, past, script, actions);
+
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const schedule = on.checked ? { after: after.value, after_limit: limit.checked, command: command.value.trim() || null } : null;
+    const commandName = command.value.trim() || null;
+    const schedule =
+      mode.value === "time" ? { when: "time", after: after.value, command: commandName }
+      : mode.value === "limit" ? { when: "limit", delay_minutes: Number(delay.value || 0), command: commandName }
+      : null;
     save.disabled = true;
     status.textContent = "";
     try {
-      await api(`/v1/devices/${entry.device_id}/shutdown-schedule`, { method: "PUT", body: { schedule } });
+      const result = await api(`/v1/devices/${entry.device_id}/shutdown-schedule`, { method: "PUT", body: { schedule } });
+      summaryValue.textContent = scheduleSummary(result.shutdown_schedule);
       status.textContent = schedule ? "Saved. The Mac picks it up within seconds." : "Turned off.";
     } catch (error) {
       if (error instanceof AuthError) return handleFailure(error);
       status.textContent = error.message === "bad_schedule"
-        ? "Use a time, and a script name of letters, digits, dots, dashes, or underscores."
+        ? "Check the time, a wait of 0–720 minutes, and a script name of letters, digits, dots, dashes, or underscores."
         : `Could not save (${error.message}).`;
     } finally {
       save.disabled = false;
     }
   });
-  return form;
+  box.append(summary, form);
+  return box;
 }
 
 async function changeShutdown(entry, method, button) {

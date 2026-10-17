@@ -11,32 +11,61 @@ final class ScheduledShutdownTests: XCTestCase {
     }
 
     func testReadsTheServersShape() {
-        XCTAssertEqual(decode(#"{"after": "22:00", "after_limit": true, "command": "last-call"}"#),
-                       ShutdownRule(after: "22:00", afterLimit: true, command: "last-call"))
-        XCTAssertEqual(decode(#"{"after": "22:00", "command": null}"#), ShutdownRule(after: "22:00"))
-        XCTAssertNil(decode(#"{"after_limit": true}"#), "a time is required")
-        XCTAssertNil(decode(#"{"after": 22}"#))
+        XCTAssertEqual(decode(#"{"when": "time", "after": "22:00", "delay_minutes": 0, "command": "last-call"}"#),
+                       ShutdownRule(when: .time, after: "22:00", command: "last-call"))
+        XCTAssertEqual(decode(#"{"when": "limit", "after": null, "delay_minutes": 30, "command": null}"#),
+                       ShutdownRule(when: .limit, delayMinutes: 30))
+        XCTAssertEqual(decode(#"{"after": "22:00", "after_limit": true}"#), ShutdownRule(when: .time, after: "22:00"),
+                       "the first version was a clock time")
+        XCTAssertNil(decode(#"{"when": "sunset"}"#))
     }
 
     func testRuleIsCheckedAgainOnTheMac() {
-        XCTAssertTrue(validShutdownRule(ShutdownRule(after: "22:00", command: "last-call.sh")))
-        XCTAssertFalse(validShutdownRule(ShutdownRule(after: "10pm")))
+        XCTAssertTrue(validShutdownRule(ShutdownRule(when: .time, after: "22:00", command: "last-call.sh")))
+        XCTAssertTrue(validShutdownRule(ShutdownRule(when: .limit, delayMinutes: 30)))
+        XCTAssertFalse(validShutdownRule(ShutdownRule(when: .time, after: "10pm")))
+        XCTAssertFalse(validShutdownRule(ShutdownRule(when: .time)))
+        XCTAssertFalse(validShutdownRule(ShutdownRule(when: .limit, delayMinutes: -1)))
+        XCTAssertFalse(validShutdownRule(ShutdownRule(when: .limit, delayMinutes: 721)))
         for command in ["", "../x", "a/b", "/bin/sh", ".hidden", "a..b", "rm -rf", "$(id)", String(repeating: "x", count: 101)] {
-            XCTAssertFalse(validShutdownRule(ShutdownRule(after: "22:00", command: command)), command)
+            XCTAssertFalse(validShutdownRule(ShutdownRule(when: .time, after: "22:00", command: command)), command)
         }
     }
 
     func testGateOpensAtTheTime() {
-        let rule = ShutdownRule(after: "22:00")
-        XCTAssertFalse(shutdownGateOpen(rule, msIntoDay: at(21, 59), overLimit: true))
-        XCTAssertTrue(shutdownGateOpen(rule, msIntoDay: at(22, 0), overLimit: false))
+        let rule = ShutdownRule(when: .time, after: "22:00")
+        let now = Date()
+        XCTAssertFalse(shutdownGateOpen(rule, msIntoDay: at(21, 59), overLimit: true, crossedAt: now, now: now))
+        XCTAssertTrue(shutdownGateOpen(rule, msIntoDay: at(22, 0), overLimit: false, crossedAt: nil, now: now))
     }
 
-    func testEveryPartMustHold() {
-        let rule = ShutdownRule(after: "22:00", afterLimit: true)
-        XCTAssertFalse(shutdownGateOpen(rule, msIntoDay: at(23, 0), overLimit: false))
-        XCTAssertFalse(shutdownGateOpen(rule, msIntoDay: at(21, 0), overLimit: true))
-        XCTAssertTrue(shutdownGateOpen(rule, msIntoDay: at(23, 0), overLimit: true))
+    func testGateOpensTheDelayAfterTheLimitIsCrossed() {
+        let rule = ShutdownRule(when: .limit, delayMinutes: 30)
+        let crossed = Date(timeIntervalSince1970: 1_000_000)
+        XCTAssertFalse(shutdownGateOpen(rule, msIntoDay: at(23, 0), overLimit: false, crossedAt: nil, now: crossed))
+        XCTAssertFalse(shutdownGateOpen(rule, msIntoDay: 0, overLimit: true, crossedAt: crossed, now: crossed.addingTimeInterval(29 * 60)))
+        XCTAssertTrue(shutdownGateOpen(rule, msIntoDay: 0, overLimit: true, crossedAt: crossed, now: crossed.addingTimeInterval(30 * 60)))
+    }
+
+    func testCrossingIsRecordedOnlyAfterBeingSeenUnder() {
+        let t = Date(timeIntervalSince1970: 1_000_000)
+        var crossing = limitCrossingStep(LimitCrossing(), day: "2026-10-17", over: true, now: t)
+        XCTAssertNil(crossing.crossedAt, "started already over: no crossing, so no delay from launch")
+        crossing = limitCrossingStep(crossing, day: "2026-10-17", over: false, now: t)
+        crossing = limitCrossingStep(crossing, day: "2026-10-17", over: true, now: t.addingTimeInterval(60))
+        XCTAssertEqual(crossing.crossedAt, t.addingTimeInterval(60))
+        crossing = limitCrossingStep(crossing, day: "2026-10-17", over: true, now: t.addingTimeInterval(120))
+        XCTAssertEqual(crossing.crossedAt, t.addingTimeInterval(60), "the first crossing stands")
+        crossing = limitCrossingStep(crossing, day: "2026-10-18", over: true, now: t.addingTimeInterval(86_400))
+        XCTAssertNil(crossing.crossedAt, "a crossing does not carry into the next day")
+    }
+
+    func testStartedOverTheLimitIsMissedEvenWithADelay() {
+        let rule = ShutdownRule(when: .limit, delayMinutes: 30)
+        let now = Date()
+        let crossing = limitCrossingStep(LimitCrossing(), day: "2026-10-17", over: true, now: now)
+        let gate = shutdownGateOpen(rule, msIntoDay: 0, overLimit: true, crossedAt: crossing.crossedAt, now: now)
+        XCTAssertEqual(shutdownStep(ShutdownWatch(), day: "2026-10-17", gateOpen: gate).1, .missed)
     }
 
     func testCommandTimeShapes() {

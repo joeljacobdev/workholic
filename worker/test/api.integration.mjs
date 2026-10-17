@@ -302,7 +302,7 @@ try {
 
   // Scheduled shutdown: a session sets it per device, and that device reads it with its orders.
   const schedulePath = `/v1/devices/${deviceId}/shutdown-schedule`;
-  const schedule = { after: "22:00", after_limit: true, command: "last-call-end" };
+  const schedule = { when: "limit", after: null, delay_minutes: 30, command: "last-call-end" };
   assert.equal(shown.shutdown_schedule, null, "no schedule until one is set");
   assert.equal((await request(schedulePath, { method: "PUT", token: device, body: { schedule } })).status, 401, "a device token cannot set a schedule");
   assert.equal((await request(schedulePath, { method: "PUT", token: web, body: { schedule: { after: "22:00", command: "../x" } } })).status, 422);

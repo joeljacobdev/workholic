@@ -64,6 +64,8 @@ final class AppModel {
     /// Where today's scheduled shutdown stands. Only the done day outlives a restart.
     private var shutdownWatch = ShutdownWatch(doneDay: UserDefaults.standard.string(forKey: AppModel.shutdownDoneKey))
     private let shutdownWarning = ShutdownWarning()
+    /// When today's limit was crossed, for a shutdown set to come a delay after it.
+    private var limitCrossing = LimitCrossing()
     /// The command's last run. `time` is nil when it failed or printed no time.
     private var shutdownCommandRan: (at: Date, command: String, time: Date?)?
     private var shutdownCommandBusy = false
@@ -743,8 +745,9 @@ final class AppModel {
             shutdownNote = "Scheduled shutdown is off: its settings do not read."
             return
         }
+        let day = civilDay(now)
         var over = false
-        if rule.afterLimit {
+        if rule.when == .limit {
             let usage = todayUsage(now: now)
             guard let ceiling = usage.ceilingMs else {
                 shutdownNote = "Scheduled shutdown waits for a daily limit."
@@ -757,9 +760,11 @@ final class AppModel {
                 return
             }
             over = usage.usedMs >= ceiling
+            limitCrossing = limitCrossingStep(limitCrossing, day: day, over: over, now: now)
         }
-        let day = civilDay(now)
-        let gate = shutdownGateOpen(rule, msIntoDay: msIntoDay(now), overLimit: over)
+        let gate = shutdownGateOpen(
+            rule, msIntoDay: msIntoDay(now), overLimit: over, crossedAt: limitCrossing.crossedAt, now: now
+        )
         let (watch, status) = shutdownStep(shutdownWatch, day: day, gateOpen: gate)
         shutdownWatch = watch
         switch status {
@@ -848,10 +853,15 @@ final class AppModel {
     }
 
     private func describeShutdown(_ rule: ShutdownRule) -> String {
-        var parts = ["after \(rule.after)"]
-        if rule.afterLimit { parts.append("past today's limit") }
-        if let command = rule.command { parts.append("not before \(command)'s time") }
-        return parts.joined(separator: ", ")
+        var text: String
+        switch rule.when {
+        case .time:
+            text = "after \(rule.after ?? "")"
+        case .limit:
+            text = rule.delayMinutes > 0 ? "\(formatDuration(Int64(rule.delayMinutes) * 60_000)) after today's limit" : "once past today's limit"
+        }
+        if let command = rule.command { text += ", or later if \(command) says so" }
+        return text
     }
 
     private func clockText(_ date: Date) -> String {

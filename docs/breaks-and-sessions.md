@@ -59,15 +59,18 @@ Settings › Devices has "Shut down…" beside each Mac. It is for a Mac left on
 
 ## Scheduled shutdown
 
-Each Mac can shut itself down daily. It is set per device in Settings › Devices, stored in the account, and reaches the Mac with its order check every 10 seconds (`GET /v1/devices/{id}/commands` returns `shutdown_schedule`). The Mac keeps the last one it heard, so it holds offline; logging out clears it. Setting it takes a login session (`PUT /v1/devices/{id}/shutdown-schedule`), like a shutdown.
+Each Mac can shut itself down daily. It is set per device in Settings › Devices, where each Mac shows a one-line summary ("Daily shutdown: 30m after today's limit, or later if last-meeting-end says so") that opens into the form. It is stored in the account and reaches the Mac with its order check every 10 seconds (`GET /v1/devices/{id}/commands` returns `shutdown_schedule`). The Mac keeps the last one it heard, so it holds offline; logging out clears it. Setting it takes a login session (`PUT /v1/devices/{id}/shutdown-schedule`), like a shutdown.
 
 ```json
-{ "after": "22:00", "after_limit": true, "command": "last-call-end" }
+{ "when": "limit", "after": null, "delay_minutes": 30, "command": "last-meeting-end" }
 ```
 
-- `after` (required): the Mac's own local time. Not before then.
-- `after_limit` (optional): also not before today's limit is used up.
-- `command` (optional): also not before the time a script prints. Whichever time is later wins.
+The shutdown comes due one of two ways:
+
+- `when: "time"`: after `after`, the Mac's own local `HH:MM`.
+- `when: "limit"`: `delay_minutes` (0–720, by the clock) after today's limit is crossed. The crossing counts only if Workholic saw the total under the limit earlier that day, so a Mac started already over does not shut down.
+
+`command` (optional) is for days that run late, such as a meeting after the usual time: the Mac also waits for the time the script prints. Whichever is later wins; a script can push the shutdown later, never earlier.
 
 `command` is only a script's file name. The Mac runs it from `~/Library/Application Support/tech.joeljacob.workholic/commands/`, through `zsh -l` so PATH matches Terminal's, with a 30-second limit. The script lives only on that Mac, with whatever credentials it needs (a calendar, say). The account can pick among scripts already there but cannot send the Mac code. The script prints when shutting down is fine, such as when the last call accepted for today ends, as either:
 
