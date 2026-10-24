@@ -80,7 +80,15 @@ final class AppModel {
     private static let breaksSyncedAtKey = "breakPlanSyncedAt"
     /// When this Mac's unsent break edit was made, to compare with an edit made elsewhere.
     private static let breaksEditedAtKey = "breakPlanEditedAt"
-    private static let settingsEverySeconds: TimeInterval = 60
+    /// The order and settings check: every minute, or every five while someone is at this Mac.
+    private static let checkEverySeconds: TimeInterval = 60
+    private static let attendedCheckEverySeconds: TimeInterval = 300
+    /// Opening the menu twice in a row checks once.
+    private static let checkAtMostEverySeconds: TimeInterval = 15
+    /// When the last check went out, so the timer and the menu do not repeat one too soon.
+    private var lastCheckAt: Date?
+    /// Whether someone was at this Mac on the last tick.
+    private var attendingNow = false
     private static let scheduledHandledKey = "scheduledHandled"
     private static let shutdownDoneKey = "scheduledShutdownDoneDay"
 
@@ -115,8 +123,8 @@ final class AppModel {
         syncTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.scheduleSync() }
         }
-        settingsTimer = Timer.scheduledTimer(withTimeInterval: Self.settingsEverySeconds, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.schedulePull() }
+        settingsTimer = Timer.scheduledTimer(withTimeInterval: Self.checkEverySeconds, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.checkIfDue() }
         }
         scheduleSync()
         promptDayPlanIfNeeded()
@@ -228,6 +236,7 @@ final class AppModel {
             return
         }
         appWindow.show(tab: tab, token: token, state: macState)
+        checkSoon()
     }
 
     /// What the page's "This Mac" panel shows. These settings live on this Mac, not in the account.
@@ -254,7 +263,7 @@ final class AppModel {
             logout()
             return
         case .saved:
-            schedulePull()
+            pullSettingsNow()
         case .pauseLocks(let on):
             defaults.set(on, forKey: Self.pauseLocksKey)
             onChange?()
@@ -494,27 +503,49 @@ final class AppModel {
         if signedIn {
             defaults.set(true, forKey: Self.breaksDirtyKey)
             defaults.set(NSNumber(value: Int64(Date().timeIntervalSince1970 * 1000)), forKey: Self.breaksEditedAtKey)
-            schedulePull()
+            pullSettingsNow()
         }
     }
 
-    private func schedulePull() {
+    /// A break edit to push, or one saved in the window to take, goes at once.
+    private func pullSettingsNow() {
+        Task { await self.pullSettings() }
+    }
+
+    /// Every minute when nobody is at this Mac, such as one left running an agent, so a shutdown
+    /// from the web lands quickly. Every five minutes while someone is: they can shut it down themselves.
+    private func checkIfDue() {
+        let every = attendingNow ? Self.attendedCheckEverySeconds : Self.checkEverySeconds
+        // A few seconds early is fine: the timer and the last check never line up exactly.
+        if let last = lastCheckAt, Date().timeIntervalSince(last) < every - 5 { return }
+        checkIn()
+    }
+
+    /// Opening the menu or a window, or waking, checks at once instead of waiting for the timer.
+    func checkSoon() {
+        if let last = lastCheckAt, Date().timeIntervalSince(last) < Self.checkAtMostEverySeconds { return }
+        checkIn()
+    }
+
+    private func checkIn() {
+        lastCheckAt = Date()
         Task {
-            await self.pullSettings()
-            await self.checkCommands()
+            if await !self.checkCommands() { await self.pullSettings() }
         }
     }
 
     /// Orders from the web for this Mac, read with its device token, so only this Mac's own.
     /// Each is acknowledged before it runs: a restart cannot run it twice, and one cancelled
     /// in the meantime comes back with `go` false and is dropped.
-    private func checkCommands() async {
-        guard !commandsBusy, !shuttingDown, let device = TokenStore.get("device") else { return }
+    /// The same answer carries the settings check. False when it did not, so they still need asking.
+    private func checkCommands() async -> Bool {
+        guard !commandsBusy, !shuttingDown else { return true }
+        guard let device = TokenStore.get("device") else { return false }
         commandsBusy = true
         defer { commandsBusy = false }
         let api = ApiClient(baseURL: ApiOrigin.baseURL)
-        // A failed check is retried within a minute. It never signs out: that is the session's job.
-        guard let pending = try? await api.commands(deviceToken: device, deviceId: deviceId) else { return }
+        // A failed check is retried with the next one. It never signs out: that is the session's job.
+        guard let pending = try? await api.commands(deviceToken: device, deviceId: deviceId) else { return true }
         if pending.shutdownSchedule != shutdownRule {
             shutdownRule = pending.shutdownSchedule
             ShutdownSchedule.save(shutdownRule)
@@ -524,8 +555,16 @@ final class AppModel {
                 deviceToken: device, deviceId: deviceId, commandId: command.commandId, result: "delivered"
             ), ack.go else { continue }
             shutDown(api: api, deviceToken: device, commandId: command.commandId)
-            return
+            return true
         }
+        guard let settings = pending.settings else { return false }
+        await adoptSettings(
+            idleThresholdMs: settings.idleThresholdMs,
+            limitMs: settings.limitMs,
+            breaksUpdatedAtMs: settings.breaksUpdatedAtMs,
+            api: api
+        )
+        return true
     }
 
     /// Clears everything of Workholic's that would stand in the way: the covers, the locked pause's
@@ -561,26 +600,42 @@ final class AppModel {
         return status
     }
 
-    /// The quick check: one small request for the limit and when breaks last changed.
-    /// Breaks are fetched or pushed only when one side moved. Readings still upload on the slower sync.
+    /// The settings check on its own: one small request for the limit and when breaks last changed.
+    /// For a break edit, and for a server whose order check does not carry it.
     private func pullSettings() async {
         guard let session = TokenStore.get("session") else { return }
         let api = ApiClient(baseURL: ApiOrigin.baseURL)
         do {
             let settings = try await api.settings(token: session)
-            config.idleThresholdMs = settings.idleThresholdMs
-            // An older server sends neither field; then the limit waits for the full sync.
-            if let breaksAt = settings.breaksUpdatedAtMs {
-                ceilingMs = settings.limitMs
-                if defaults.bool(forKey: Self.breaksDirtyKey) || breaksAt != syncedBreaksAt {
-                    try await syncBreaks(api: api, session: session)
-                }
-            }
-            onChange?()
+            await adoptSettings(
+                idleThresholdMs: settings.idleThresholdMs,
+                limitMs: settings.limitMs,
+                breaksUpdatedAtMs: settings.breaksUpdatedAtMs,
+                api: api
+            )
         } catch {
             if ApiError.isSignedOut(error) { logout() }
-            // Anything else is a missed check. The next one is seconds away.
+            // Anything else is a missed check. The next one tries again.
         }
+    }
+
+    /// Breaks are fetched or pushed only when one side moved. Readings still upload on the slower sync.
+    private func adoptSettings(idleThresholdMs: Int64, limitMs: Int64?, breaksUpdatedAtMs: Int64?, api: ApiClient) async {
+        guard let session = TokenStore.get("session") else { return }
+        config.idleThresholdMs = idleThresholdMs
+        // An older server sends neither field; then the limit waits for the full sync.
+        if let breaksAt = breaksUpdatedAtMs {
+            ceilingMs = limitMs
+            if defaults.bool(forKey: Self.breaksDirtyKey) || breaksAt != syncedBreaksAt {
+                do {
+                    try await syncBreaks(api: api, session: session)
+                } catch {
+                    if ApiError.isSignedOut(error) { logout() }
+                    return
+                }
+            }
+        }
+        onChange?()
     }
 
     private var syncedBreaksAt: Int64 {
@@ -671,6 +726,7 @@ final class AppModel {
     @objc private func didWake() {
         tick()
         promptDayPlanIfNeeded()
+        checkSoon()
     }
 
     private func tick() {
@@ -690,6 +746,7 @@ final class AppModel {
             ),
             idleThresholdMs: config.idleThresholdMs
         )
+        attendingNow = isAttending
         let step = captureStep(
             open: store.open,
             sample: SampleTick(

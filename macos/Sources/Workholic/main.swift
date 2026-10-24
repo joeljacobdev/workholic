@@ -3,7 +3,7 @@ import ServiceManagement
 import WorkholicCore
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var model: AppModel!
 
@@ -42,6 +42,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model?.stop()
     }
 
+    /// Opening the menu bar menu asks the account at once, so a change from the web shows up.
+    func menuWillOpen(_ menu: NSMenu) {
+        model.checkSoon()
+    }
+
     /// Two or three lines of state, then Dashboard, Breaks, Settings, and the account.
     /// Everything else lives in the app window, which is the same page as the web app.
     private func rebuildMenu() {
@@ -64,6 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(item("Log In…", #selector(logIn)))
         }
         menu.addItem(item("Quit Workholic", #selector(quit), key: "q"))
+        menu.delegate = self
         statusItem.menu = menu
         showStatus(badge: model.statusBadge, fraction: model.usageFraction)
     }

@@ -1,5 +1,5 @@
 // A deploy gives new requests new code, but a Durable Object that never goes idle keeps the code
-// it started with: the Macs ask every minute, so an account object could run old code for days,
+// it started with: the Macs ask every few minutes, so an account object could run old code for days,
 // and new methods fail with "The RPC receiver does not implement the method".
 //
 // So the first time a Worker isolate talks to an object, it hands over its own version. An object

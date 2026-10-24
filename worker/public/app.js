@@ -638,11 +638,11 @@ function renderSettings() {
 /** A shutdown is waiting for its Mac, so the device list is checked again with the settings. */
 let shutdownPending = false;
 
-/** A running Mac checks in about once a minute and is marked seen at most once a minute. */
+/** A running Mac checks in every minute, or every five while someone is at it, and is marked seen at most once a minute. */
 function presence(ms) {
   if (ms == null) return null;
   const minutes = (Date.now() - ms) / 60_000;
-  if (minutes < 2) return "on now";
+  if (minutes < 7) return "on now";
   if (minutes < 60) return `last on ${Math.round(minutes)} min ago`;
   if (minutes < 48 * 60) return `last on ${Math.round(minutes / 60)} h ago`;
   return `last on ${Math.round(minutes / 1440)} days ago`;
@@ -667,7 +667,7 @@ function shutdownLine(entry) {
   ask.type = "button";
   ask.addEventListener("click", () => {
     const sure = confirm(
-      `Shut down "${entry.display_name}"?\n\nIt shuts down within a minute if it is on, or the next time Workholic runs on it. Unsaved work in open apps can stop the shutdown or be lost.`,
+      `Shut down "${entry.display_name}"?\n\nIt shuts down within a few minutes if it is on, or the next time Workholic runs on it. Unsaved work in open apps can stop the shutdown or be lost.`,
     );
     if (sure) changeShutdown(entry, "POST", ask);
   });
@@ -768,7 +768,7 @@ function scheduleForm(entry) {
     try {
       const result = await api(`/v1/devices/${entry.device_id}/shutdown-schedule`, { method: "PUT", body: { schedule } });
       summaryValue.textContent = scheduleSummary(result.shutdown_schedule);
-      status.textContent = schedule ? "Saved. The Mac picks it up within a minute." : "Turned off.";
+      status.textContent = schedule ? "Saved. The Mac picks it up within a few minutes." : "Turned off.";
     } catch (error) {
       if (error instanceof AuthError) return handleFailure(error);
       status.textContent = error.message === "bad_schedule"

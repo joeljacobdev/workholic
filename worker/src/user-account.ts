@@ -63,7 +63,7 @@ export interface DeviceInfo {
   platform: string;
   created_at_ms: number;
   last_upload_at_ms: number | null;
-  /** When the device last asked for its commands, about once a minute while it runs. */
+  /** When the device last asked for its commands: every few minutes while it runs, more often when nobody is at it. */
   last_seen_at_ms: number | null;
   revoked: boolean;
   /** The latest shutdown asked for on this device, if any. */
@@ -401,7 +401,7 @@ export class UserAccount extends DurableObject<Env> {
     };
   }
 
-  // Cheap enough for a Mac to ask every few seconds: it says when breaks last changed
+  // Cheap enough to ask every minute: it says when breaks last changed
   // and what limit governs right now, so the Mac fetches breaks only when they moved.
   async settings(input: { token: string; now: number }): Promise<{
     timezone: string;
@@ -413,16 +413,20 @@ export class UserAccount extends DurableObject<Env> {
     const allowed = (await this.sessionFor(input.token, input.now)) || (await this.deviceFor(input.token));
     if (!allowed) return null;
     const user = this.requireUser();
-    const breaks = this.ctx.storage.sql
-      .exec<{ updated_at_ms: number }>("SELECT updated_at_ms FROM break_settings WHERE id = 1")
-      .toArray()[0];
     return {
       timezone: user.timezone,
       idleThresholdMs: user.idle_threshold_ms,
       username: user.username,
       limitMs: this.ceilingMs(input.now),
-      breaksUpdatedAtMs: breaks?.updated_at_ms ?? 0,
+      breaksUpdatedAtMs: this.breaksUpdatedAtMs(),
     };
+  }
+
+  private breaksUpdatedAtMs(): number {
+    const breaks = this.ctx.storage.sql
+      .exec<{ updated_at_ms: number }>("SELECT updated_at_ms FROM break_settings WHERE id = 1")
+      .toArray()[0];
+    return breaks?.updated_at_ms ?? 0;
   }
 
   // updated_at_ms is 0 until someone saves, so a Mac knows to upload its own copy.
@@ -508,8 +512,15 @@ export class UserAccount extends DurableObject<Env> {
     return { shutdown_schedule: schedule };
   }
 
-  /** A device's own pending orders and its scheduled shutdown. Also notes that the device is running. */
-  async pendingCommands(input: { deviceToken: string; pathDeviceId: string; now: number }): Promise<CommandResult<{ commands: Array<{ command_id: string; kind: string; requested_at_ms: number }>; shutdown_schedule: ShutdownSchedule | null }>> {
+  /**
+   * A device's own pending orders and its scheduled shutdown, plus what `settings` would say,
+   * so a Mac's regular check is one request. Also notes that the device is running.
+   */
+  async pendingCommands(input: { deviceToken: string; pathDeviceId: string; now: number }): Promise<CommandResult<{
+    commands: Array<{ command_id: string; kind: string; requested_at_ms: number }>;
+    shutdown_schedule: ShutdownSchedule | null;
+    settings: { idle_threshold_ms: number; limit_ms: number | null; breaks_updated_at_ms: number };
+  }>> {
     const device = await this.liveDevice(input.deviceToken, input.pathDeviceId);
     if ("error" in device) return device;
     const seen = this.ctx.storage.sql
@@ -527,7 +538,15 @@ export class UserAccount extends DurableObject<Env> {
         device.deviceId,
       )
       .toArray();
-    return { commands, shutdown_schedule: this.storedSchedule(seen?.shutdown_schedule_json ?? null) };
+    return {
+      commands,
+      shutdown_schedule: this.storedSchedule(seen?.shutdown_schedule_json ?? null),
+      settings: {
+        idle_threshold_ms: this.requireUser().idle_threshold_ms,
+        limit_ms: this.ceilingMs(input.now),
+        breaks_updated_at_ms: this.breaksUpdatedAtMs(),
+      },
+    };
   }
 
   /**

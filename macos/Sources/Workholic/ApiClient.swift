@@ -89,16 +89,32 @@ struct CommandsResponse: Decodable {
     /// Nil when none is set, when an older server leaves it out, or when it does not read:
     /// a bad schedule must not stop the orders from being read.
     var shutdownSchedule: ShutdownRule?
+    /// What `/v1/settings` would say, so one request does both. Nil from a server before this field.
+    var settings: CheckedSettings?
 
     enum CodingKeys: String, CodingKey {
         case commands
         case shutdownSchedule = "shutdown_schedule"
+        case settings
     }
 
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         commands = try values.decode([DeviceCommand].self, forKey: .commands)
         shutdownSchedule = (try? values.decodeIfPresent(ShutdownRule.self, forKey: .shutdownSchedule)) ?? nil
+        settings = try? values.decodeIfPresent(CheckedSettings.self, forKey: .settings)
+    }
+}
+
+struct CheckedSettings: Decodable {
+    var idleThresholdMs: Int64
+    /// The limit in force now. Nil when none is set.
+    var limitMs: Int64?
+    var breaksUpdatedAtMs: Int64
+    enum CodingKeys: String, CodingKey {
+        case idleThresholdMs = "idle_threshold_ms"
+        case limitMs = "limit_ms"
+        case breaksUpdatedAtMs = "breaks_updated_at_ms"
     }
 }
 

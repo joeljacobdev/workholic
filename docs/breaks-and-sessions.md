@@ -49,17 +49,17 @@ It is not the macOS lock screen. That screen cannot show Workholic's cover, and 
 
 ## Shutting a Mac down from the web
 
-Settings › Devices has "Shut down…" beside each Mac. It is for a Mac left on and paused, such as one running an agent, that should not stay on. The order waits on the server until that Mac picks it up: within about a minute if Workholic is running there, otherwise the next time it runs while signed in. Cancel withdraws it until then.
+Settings › Devices has "Shut down…" beside each Mac. It is for a Mac left on and paused, such as one running an agent, that should not stay on. The order waits on the server until that Mac picks it up: within about a minute if Workholic is running there and nobody is at it, within five minutes if someone is (opening the menu bar menu checks at once), otherwise the next time it runs while signed in. Cancel withdraws it until then.
 
 - Only a login session (the web app, or a Mac's dashboard window) can ask for or cancel a shutdown. A Mac's device token cannot, so a token taken from one Mac cannot shut down another.
 - A Mac reads only its own orders, with its device token (`GET /v1/devices/{id}/commands`).
 - The Mac acknowledges an order before acting on it (`POST /v1/devices/{id}/commands/{command}:ack`). The server says go only to the first acknowledgement of an order nobody cancelled, so a restart cannot shut it down twice and a cancel that wins the race stops it.
 - To shut down, Workholic lifts its covers and the locked pause's kiosk mode, which would otherwise block it, and sends loginwindow the "shut down" Apple Event: the Apple menu's Shut Down without the dialog. Apps are asked to quit, so one with unsaved work can still stop it. If macOS refuses the request, the Mac reports it and the web shows that the shutdown did not go through.
-- Settings › Devices also shows when each Mac last checked in ("on now"), from those checks.
+- Settings › Devices also shows when each Mac last checked in ("on now" within the last 7 minutes), from those checks.
 
 ## Scheduled shutdown
 
-Each Mac can shut itself down daily. It is set per device in Settings › Devices, where each Mac shows a one-line summary ("Daily shutdown: 30m after today's limit, or later if last-meeting-end says so") that opens into the form. It is stored in the account and reaches the Mac with its order check every minute (`GET /v1/devices/{id}/commands` returns `shutdown_schedule`). The Mac keeps the last one it heard, so it holds offline; logging out clears it. Setting it takes a login session (`PUT /v1/devices/{id}/shutdown-schedule`), like a shutdown.
+Each Mac can shut itself down daily. It is set per device in Settings › Devices, where each Mac shows a one-line summary ("Daily shutdown: 30m after today's limit, or later if last-meeting-end says so") that opens into the form. It is stored in the account and reaches the Mac with its order check (`GET /v1/devices/{id}/commands` returns `shutdown_schedule`). The Mac keeps the last one it heard, so it holds offline; logging out clears it. Setting it takes a login session (`PUT /v1/devices/{id}/shutdown-schedule`), like a shutdown.
 
 ```json
 { "when": "limit", "after": null, "delay_minutes": 30, "command": "last-meeting-end" }
@@ -91,7 +91,7 @@ The shutdown itself is the same as one from the web: covers lifted, then the "sh
 
 ## Settings are one copy, the latest save wins
 
-Break settings and the daily limit live in the account. An edit on a Mac goes up at once. Every Mac, and the web Settings page while it is open, asks every minute whether anything changed. That check is one small request (`GET /v1/settings` returns the limit and when breaks last changed). The full break list is fetched only when that time moves.
+Break settings and the daily limit live in the account. An edit on a Mac goes up at once. The web Settings page, while it is open, asks every minute whether anything changed (`GET /v1/settings` returns the limit and when breaks last changed). A Mac gets the same fields in its order check (`GET /v1/devices/{id}/commands` returns `settings`), so each check is one request: every minute when nobody is at the Mac, every five minutes while someone is, and at once (at most every 15 seconds) when the menu bar menu or a window opens or the Mac wakes. The full break list is fetched only when that time moves. A break edit goes up at once.
 
 If two places edit breaks before either has heard of the other, the later edit wins. A Mac compares the time of its own unsent edit with the account's `updated_at_ms`. The web form keeps unsaved edits and says another device changed breaks; saving then wins because it is later.
 

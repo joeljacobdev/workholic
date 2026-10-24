@@ -269,7 +269,18 @@ try {
   assert.equal((await request(shutdownPath, { method: "POST", token: device })).status, 401, "a device token cannot ask for a shutdown");
   assert.equal((await request(shutdownPath, { method: "POST" })).status, 401);
   assert.equal((await request(`/v1/devices/${otherId}/shutdown`, { method: "POST", token: web })).status, 404);
-  assert.deepEqual((await request(commandsPath, { token: device })).body.commands, [], "nothing pending yet");
+  const firstCheck = await request(commandsPath, { token: device });
+  assert.deepEqual(firstCheck.body.commands, [], "nothing pending yet");
+  const settingsNow = (await request("/v1/settings", { token: web })).body;
+  assert.deepEqual(
+    firstCheck.body.settings,
+    {
+      idle_threshold_ms: settingsNow.idle_threshold_ms,
+      limit_ms: settingsNow.limit_ms,
+      breaks_updated_at_ms: settingsNow.breaks_updated_at_ms,
+    },
+    "the order check carries the settings check",
+  );
   assert.equal((await request(commandsPath, { token: web })).status, 401, "a session cannot read a device's orders");
   assert.equal((await request(`/v1/devices/${otherId}/commands`, { token: device })).status, 403, "a device reads only its own orders");
 
