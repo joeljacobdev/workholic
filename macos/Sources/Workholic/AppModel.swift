@@ -80,7 +80,7 @@ final class AppModel {
     private static let breaksSyncedAtKey = "breakPlanSyncedAt"
     /// When this Mac's unsent break edit was made, to compare with an edit made elsewhere.
     private static let breaksEditedAtKey = "breakPlanEditedAt"
-    private static let settingsEverySeconds: TimeInterval = 10
+    private static let settingsEverySeconds: TimeInterval = 60
     private static let scheduledHandledKey = "scheduledHandled"
     private static let shutdownDoneKey = "scheduledShutdownDoneDay"
 
@@ -513,7 +513,7 @@ final class AppModel {
         commandsBusy = true
         defer { commandsBusy = false }
         let api = ApiClient(baseURL: ApiOrigin.baseURL)
-        // A failed check is retried in seconds. It never signs out: that is the session's job.
+        // A failed check is retried within a minute. It never signs out: that is the session's job.
         guard let pending = try? await api.commands(deviceToken: device, deviceId: deviceId) else { return }
         if pending.shutdownSchedule != shutdownRule {
             shutdownRule = pending.shutdownSchedule

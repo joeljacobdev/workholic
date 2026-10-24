@@ -8,10 +8,7 @@
   "workers_dev": false,
   "preview_urls": false,
   "observability": {
-    "enabled": true,
-    "traces": {
-      "enabled": true
-    }
+    "enabled": false
   },
   // WORKHOLIC_BOOTSTRAP_TOKEN is a secret: `wrangler secret put`, and .dev.vars locally.
   "assets": {

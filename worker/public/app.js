@@ -4,7 +4,7 @@ const TOKEN_KEY = "workholic.session";
 const TABS = ["today", "history", "day", "settings"];
 const GAUGE_CIRCUMFERENCE = 2 * Math.PI * 50;
 const REFRESH_MS = 60_000;
-const SETTINGS_CHECK_MS = 10_000;
+const SETTINGS_CHECK_MS = 60_000;
 const HOUR_MS = 3_600_000;
 const DEVICE_SLOTS = 5;
 // Credited runs closer than this read as one stretch on the timeline.
@@ -638,7 +638,7 @@ function renderSettings() {
 /** A shutdown is waiting for its Mac, so the device list is checked again with the settings. */
 let shutdownPending = false;
 
-/** A running Mac checks in about every 10 seconds and is marked seen at most once a minute. */
+/** A running Mac checks in about once a minute and is marked seen at most once a minute. */
 function presence(ms) {
   if (ms == null) return null;
   const minutes = (Date.now() - ms) / 60_000;
@@ -667,7 +667,7 @@ function shutdownLine(entry) {
   ask.type = "button";
   ask.addEventListener("click", () => {
     const sure = confirm(
-      `Shut down "${entry.display_name}"?\n\nIt shuts down within seconds if it is on, or the next time Workholic runs on it. Unsaved work in open apps can stop the shutdown or be lost.`,
+      `Shut down "${entry.display_name}"?\n\nIt shuts down within a minute if it is on, or the next time Workholic runs on it. Unsaved work in open apps can stop the shutdown or be lost.`,
     );
     if (sure) changeShutdown(entry, "POST", ask);
   });
@@ -768,7 +768,7 @@ function scheduleForm(entry) {
     try {
       const result = await api(`/v1/devices/${entry.device_id}/shutdown-schedule`, { method: "PUT", body: { schedule } });
       summaryValue.textContent = scheduleSummary(result.shutdown_schedule);
-      status.textContent = schedule ? "Saved. The Mac picks it up within seconds." : "Turned off.";
+      status.textContent = schedule ? "Saved. The Mac picks it up within a minute." : "Turned off.";
     } catch (error) {
       if (error instanceof AuthError) return handleFailure(error);
       status.textContent = error.message === "bad_schedule"
@@ -961,7 +961,7 @@ function renderBreaks(settings) {
   breaksAt = settings.updated_at_ms ?? 0;
 }
 
-// While Settings is open, a change made on a Mac or another browser shows up within seconds.
+// While Settings is open, a change made on a Mac or another browser shows up within a minute.
 // Unsaved edits here are left alone: the latest save wins, so saving them replaces the other change.
 async function checkSettings() {
   try {

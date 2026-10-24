@@ -63,7 +63,7 @@ export interface DeviceInfo {
   platform: string;
   created_at_ms: number;
   last_upload_at_ms: number | null;
-  /** When the device last asked for its commands, about every 10 seconds while it runs. */
+  /** When the device last asked for its commands, about once a minute while it runs. */
   last_seen_at_ms: number | null;
   revoked: boolean;
   /** The latest shutdown asked for on this device, if any. */
