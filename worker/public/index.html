@@ -14,7 +14,11 @@
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="preload" href="/fonts/instrument-sans.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/app.css">
-  <script src="/app.js" defer></script>
+  <link rel="modulepreload" href="/js/core.js">
+  <link rel="modulepreload" href="/js/day.js">
+  <link rel="modulepreload" href="/js/devices.js">
+  <link rel="modulepreload" href="/js/plan.js">
+  <script type="module" src="/js/main.js"></script>
 </head>
 <body>
   <main id="login-view" class="login" hidden>
@@ -48,7 +52,7 @@
 
     <p id="app-error" class="error banner" role="alert" hidden></p>
 
-    <section id="tab-today" class="tab-panel" hidden>
+    <section id="tab-today" class="tab-panel loading" hidden>
       <div class="hero">
         <div class="gauge-wrap">
           <svg class="gauge" viewBox="0 0 120 120" aria-hidden="true">
@@ -62,7 +66,7 @@
         </div>
         <dl class="hero-facts">
           <div><dt id="today-date">Today</dt><dd id="today-left" class="lead">–</dd></div>
-          <div><dt>Daily limit</dt><dd id="today-limit">–</dd></div>
+          <div><dt id="today-limit-label">Daily limit</dt><dd id="today-limit">–</dd></div>
           <div><dt>Devices today</dt><dd id="today-devices">–</dd></div>
         </dl>
       </div>
@@ -95,15 +99,69 @@
     </section>
 
     <section id="tab-settings" class="tab-panel" hidden>
-      <div class="panel">
-        <h2>Daily limit</h2>
-        <form id="limit-form" class="limit-form">
-          <label>Hours <input id="limit-hours" type="number" min="0" max="24" step="1" inputmode="numeric" required></label>
-          <label>Minutes <input id="limit-minutes" type="number" min="0" max="59" step="5" inputmode="numeric" required></label>
-          <button type="submit" class="primary" id="limit-save">Save limit</button>
+      <div class="panel" id="plan-panel">
+        <h2>Your day</h2>
+        <p class="muted small">One plan for all your Macs. Nothing changes until you press Save; each Mac picks it up within 5 minutes.</p>
+        <form id="plan-form" class="plan" novalidate>
+          <div class="modes" role="radiogroup" aria-label="How to plan the day">
+            <label class="option">
+              <input type="radio" name="plan-mode" value="limit" id="plan-mode-limit">
+              <span><strong>Daily limit</strong><span class="muted">One total for the day, counted across all your devices.</span></span>
+            </label>
+            <label class="option">
+              <input type="radio" name="plan-mode" value="planner" id="plan-mode-planner">
+              <span><strong>Time blocks</strong><span class="muted">Work at set times. Outside them, your Macs can cover the screen.</span></span>
+            </label>
+          </div>
+          <div id="plan-limit" class="limit-form">
+            <label>Hours <input id="limit-hours" type="number" min="0" max="24" step="1" inputmode="numeric"></label>
+            <label>Minutes <input id="limit-minutes" type="number" min="0" max="59" step="5" inputmode="numeric"></label>
+          </div>
+          <div id="plan-planner" class="planner" hidden>
+            <div class="block-group">
+              <h3>Weekdays</h3>
+              <ol id="blocks-weekdays" class="blocks"></ol>
+              <button type="button" class="link" data-add="weekdays">Add a block</button>
+            </div>
+            <div class="block-group">
+              <h3>Weekends</h3>
+              <ol id="blocks-weekends" class="blocks"></ol>
+              <button type="button" class="link" data-add="weekends">Add a block</button>
+            </div>
+            <div class="block-group">
+              <h3>Today</h3>
+              <p id="today-blocks-note" class="muted small"></p>
+              <ol id="blocks-today" class="blocks" hidden></ol>
+              <div class="line">
+                <button type="button" class="link" id="today-change">Change today only</button>
+                <button type="button" class="link" data-add="today" id="today-add" hidden>Add a block</button>
+                <button type="button" class="link quiet" id="today-reset" hidden>Back to the usual blocks</button>
+              </div>
+            </div>
+            <fieldset class="block-group">
+              <legend>Outside the blocks</legend>
+              <label class="check"><input type="radio" name="plan-outside" value="pause"> Cover the screen. “15 more minutes”, or unlock with the Mac’s password.</label>
+              <label class="check"><input type="radio" name="plan-outside" value="none"> Do nothing</label>
+            </fieldset>
+          </div>
+          <fieldset class="plan-fields">
+            <legend>End of the day</legend>
+            <label class="field"><span>Shut down</span><select id="plan-shutdown"></select></label>
+            <label class="field" id="plan-at-row"><span>At</span><input id="plan-at" type="time"></label>
+            <label class="field" id="plan-delay-row"><span>Wait</span><input id="plan-delay" type="number" min="0" max="720" step="5" inputmode="numeric"><span>minutes after crossing</span></label>
+            <details id="plan-script-row" class="script">
+              <summary>Let a script on the Mac push it later</summary>
+              <label class="field"><span>Script</span><input id="plan-command" type="text" placeholder="script file name" spellcheck="false" autocapitalize="off"></label>
+              <p class="hint">On each Mac, put an executable script in <code>~/Library/Application Support/tech.joeljacob.workholic/commands/</code>. It prints one time, <code>21:30</code> or <code>2026-10-17T21:30:00-07:00</code>; if that is later, the Mac waits for it.</p>
+            </details>
+          </fieldset>
+          <p id="plan-preview" class="preview" aria-live="polite"></p>
+          <div class="line">
+            <button type="submit" class="primary" id="plan-save" disabled>Save</button>
+            <button type="button" class="link" id="plan-discard" hidden>Discard changes</button>
+          </div>
+          <p id="plan-status" class="muted small" role="status"></p>
         </form>
-        <p id="limit-status" class="muted small" role="status"></p>
-        <p class="muted small">A new limit applies from today onward. Past days keep the limit they had.</p>
       </div>
       <div class="panel">
         <h2>Breaks</h2>
@@ -149,17 +207,22 @@
         <p id="mac-login-note" class="muted small" hidden>macOS needs your OK: turn Workholic on in System Settings › General › Login Items.</p>
         <label class="check"><input type="checkbox" id="mac-lock"> Lock the Pause screen with this Mac’s password</label>
         <p class="muted small">Pause keeps the Mac awake and your programs running behind a dark screen. Locked, getting back in asks for your Mac password or Touch ID, and switching apps or quitting is blocked until then.</p>
-        <h3>Budget on this Mac</h3>
-        <label class="check"><input type="radio" name="mac-mode" value="fixed" id="mac-mode-fixed"> Daily limit (the one above, counted across devices)</label>
-        <label class="check"><input type="radio" name="mac-mode" value="dynamic" id="mac-mode-dynamic"> Today’s tasks (planned each morning, this Mac only)</label>
-        <button type="button" id="mac-plan" class="link" hidden>Plan today…</button>
         <p class="muted small">These stay on this Mac. <span id="mac-version"></span></p>
       </div>
       <div class="panel">
-        <h2>Devices</h2>
+        <div class="panel-head">
+          <h2>Devices</h2>
+          <label class="check pick-all" id="devices-all-label" hidden><input type="checkbox" id="devices-all"> Pick all Macs</label>
+        </div>
         <ul id="settings-devices" class="device-list"></ul>
         <p id="settings-devices-empty" class="muted small" hidden>No devices yet. Log in from the Mac app to add one.</p>
-        <p class="muted small">A daily shutdown uses the Mac’s own clock and warns for 60 seconds with Cancel first. If its script is missing or fails, the Mac does not shut down.</p>
+        <div id="device-bulk" class="bulk" role="group" aria-label="Picked Macs" hidden>
+          <span id="bulk-count" class="count"></span>
+          <button type="button" id="bulk-shutdown" class="link warn">Shut down now…</button>
+          <button type="button" id="bulk-clear" class="link quiet">Clear</button>
+        </div>
+        <p id="bulk-status" class="muted small" role="status"></p>
+        <p class="muted small">Pick Macs to shut them down together. The daily shutdown is set under Your day, and every Mac follows it on its own clock with a 60-second warning first. If its script is missing or fails, the Mac does not shut down.</p>
       </div>
       <div class="panel">
         <h2>Account</h2>
@@ -173,5 +236,15 @@
   </div>
 
   <div id="tip" class="tip" role="tooltip" hidden></div>
+
+  <dialog id="dialog" aria-labelledby="dialog-title">
+    <h2 id="dialog-title"></h2>
+    <div id="dialog-body"></div>
+    <p id="dialog-status" class="error" role="alert"></p>
+    <div class="dialog-actions">
+      <button type="button" id="dialog-cancel" class="secondary">Cancel</button>
+      <button type="button" id="dialog-ok" class="primary"></button>
+    </div>
+  </dialog>
 </body>
 </html>

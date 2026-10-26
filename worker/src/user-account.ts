@@ -5,7 +5,10 @@ import { dayKey, dayWindow, daysTouched } from "./day";
 import { restartIfOlder, type CodeVersion } from "./fresh";
 import { creditDay, type DayCredit, type RawInterval } from "./merge";
 import { base64url, sha256Hex } from "./password";
-import { readShutdownSchedule, type ShutdownSchedule } from "./schedule";
+import { DEFAULT_PLAN, legacyShutdown, readDayPlan, readDeviceIds, type DayPlan, type ShutdownSchedule } from "./plan";
+import { askShutdowns, latestShutdown, latestShutdowns, refuseTargets, withdrawShutdown, type ShutdownState } from "./shutdown";
+
+export type { ShutdownState };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const APP_KEY = /^[A-Za-z0-9._-]{1,200}$/;
@@ -68,16 +71,6 @@ export interface DeviceInfo {
   revoked: boolean;
   /** The latest shutdown asked for on this device, if any. */
   shutdown: ShutdownState | null;
-  /** This device's daily scheduled shutdown, or null when it has none. */
-  shutdown_schedule: ShutdownSchedule | null;
-}
-
-export interface ShutdownState {
-  command_id: string;
-  state: "pending" | "cancelled" | "delivered" | "failed";
-  requested_at_ms: number;
-  delivered_at_ms: number | null;
-  result: string | null;
 }
 
 export type CommandResult<T> = T | { error: string; status: number };
@@ -254,14 +247,21 @@ export class UserAccount extends DurableObject<Env> {
           result TEXT
         )`,
         `CREATE INDEX IF NOT EXISTS device_command_device ON device_command (device_id, requested_at_ms)`,
+        // The account's one plan for the day, for every Mac. See plan.ts.
+        `CREATE TABLE IF NOT EXISTS day_plan (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          plan_json TEXT NOT NULL,
+          updated_at_ms INTEGER NOT NULL
+        )`,
       ];
       for (const statement of statements) this.ctx.storage.sql.exec(statement);
       const deviceColumns = this.ctx.storage.sql.exec<{ name: string }>("PRAGMA table_info(device)").toArray();
       if (!deviceColumns.some((column) => column.name === "last_seen_at_ms")) {
         this.ctx.storage.sql.exec("ALTER TABLE device ADD COLUMN last_seen_at_ms INTEGER");
       }
-      if (!deviceColumns.some((column) => column.name === "shutdown_schedule_json")) {
-        this.ctx.storage.sql.exec("ALTER TABLE device ADD COLUMN shutdown_schedule_json TEXT");
+      // Each Mac once had its own scheduled shutdown; the account's plan replaced it.
+      if (deviceColumns.some((column) => column.name === "shutdown_schedule_json")) {
+        this.ctx.storage.sql.exec("ALTER TABLE device DROP COLUMN shutdown_schedule_json");
       }
     });
   }
@@ -409,17 +409,59 @@ export class UserAccount extends DurableObject<Env> {
     username: string;
     limitMs: number | null;
     breaksUpdatedAtMs: number;
+    dayPlan: DayPlan;
+    dayPlanUpdatedAtMs: number;
   } | null> {
     const allowed = (await this.sessionFor(input.token, input.now)) || (await this.deviceFor(input.token));
     if (!allowed) return null;
     const user = this.requireUser();
+    const plan = this.storedPlan();
     return {
       timezone: user.timezone,
       idleThresholdMs: user.idle_threshold_ms,
       username: user.username,
       limitMs: this.ceilingMs(input.now),
       breaksUpdatedAtMs: this.breaksUpdatedAtMs(),
+      dayPlan: plan.plan,
+      dayPlanUpdatedAtMs: plan.updatedAtMs,
     };
+  }
+
+  /** The account's plan, or the default (a limit, nothing else) until one is saved, with `updatedAtMs` 0. */
+  private storedPlan(): { plan: DayPlan; updatedAtMs: number } {
+    const row = this.ctx.storage.sql
+      .exec<{ plan_json: string; updated_at_ms: number }>("SELECT plan_json, updated_at_ms FROM day_plan WHERE id = 1")
+      .toArray()[0];
+    if (!row) return { plan: DEFAULT_PLAN, updatedAtMs: 0 };
+    const plan = readDayPlan(JSON.parse(row.plan_json));
+    return { plan: plan === "invalid" ? DEFAULT_PLAN : plan, updatedAtMs: row.updated_at_ms };
+  }
+
+  /**
+   * Saves the plan, and the daily limit with it when one is given and differs. Only a login session
+   * may. The limit stays in budget_version, so past days keep the limit they had.
+   */
+  async setDayPlan(input: { sessionToken: string; plan: unknown; limitMs: unknown; now: number }): Promise<CommandResult<{
+    day_plan: DayPlan;
+    day_plan_updated_at_ms: number;
+    limit_ms: number | null;
+  }>> {
+    if (!(await this.sessionFor(input.sessionToken, input.now))) return { error: "bad_token", status: 401 };
+    const plan = readDayPlan(input.plan);
+    if (plan === "invalid") return { error: "bad_plan", status: 422 };
+    const limitMs = input.limitMs;
+    if (limitMs !== undefined && limitMs !== null && (!Number.isInteger(limitMs) || (limitMs as number) < 0 || (limitMs as number) > 24 * 3_600_000)) {
+      return { error: "bad_limit", status: 422 };
+    }
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec(
+        "INSERT INTO day_plan (id, plan_json, updated_at_ms) VALUES (1, ?, ?) ON CONFLICT (id) DO UPDATE SET plan_json = excluded.plan_json, updated_at_ms = excluded.updated_at_ms",
+        JSON.stringify(plan),
+        input.now,
+      );
+    });
+    if (typeof limitMs === "number" && limitMs !== this.ceilingMs(input.now)) await this.setLimit({ limitMs, now: input.now });
+    return { day_plan: plan, day_plan_updated_at_ms: input.now, limit_ms: this.ceilingMs(input.now) };
   }
 
   private breaksUpdatedAtMs(): number {
@@ -465,69 +507,48 @@ export class UserAccount extends DurableObject<Env> {
 
   /** Asks a Mac to shut down the next time it checks in. Asking again while one is pending returns that one. */
   async requestShutdown(input: { sessionToken: string; deviceId: string; now: number }): Promise<CommandResult<ShutdownState>> {
+    const asked = await this.requestShutdowns({ sessionToken: input.sessionToken, deviceIds: [input.deviceId], now: input.now });
+    return "error" in asked ? asked : asked.shutdowns[0].shutdown;
+  }
+
+  /** The same for several Macs at once: every one is a signed-in Mac, or none is asked. */
+  async requestShutdowns(input: { sessionToken: string; deviceIds: unknown; now: number }): Promise<CommandResult<{
+    shutdowns: Array<{ device_id: string; shutdown: ShutdownState }>;
+  }>> {
     if (!(await this.sessionFor(input.sessionToken, input.now))) return { error: "bad_token", status: 401 };
-    const device = this.ctx.storage.sql
-      .exec<{ platform: string; revoked_at_ms: number | null }>("SELECT platform, revoked_at_ms FROM device WHERE device_id = ?", input.deviceId)
-      .toArray()[0];
-    if (!device) return { error: "no_such_device", status: 404 };
-    if (device.revoked_at_ms !== null) return { error: "revoked", status: 409 };
-    if (device.platform !== "macos") return { error: "not_supported", status: 422 };
-    const pending = this.latestShutdown(input.deviceId);
-    if (pending?.state === "pending") return pending;
-    this.ctx.storage.sql.exec(
-      "INSERT INTO device_command (command_id, device_id, kind, requested_at_ms, cancelled_at_ms, delivered_at_ms, result) VALUES (?, ?, 'shutdown', ?, NULL, NULL, NULL)",
-      crypto.randomUUID(),
-      input.deviceId,
-      input.now,
-    );
-    return this.latestShutdown(input.deviceId)!;
+    const deviceIds = readDeviceIds(input.deviceIds);
+    if (deviceIds === "invalid") return { error: "bad_device_ids", status: 422 };
+    const sql = this.ctx.storage.sql;
+    const refused = refuseTargets(sql, deviceIds);
+    if (refused) return refused;
+    this.ctx.storage.transactionSync(() => askShutdowns(sql, deviceIds, input.now));
+    return { shutdowns: deviceIds.map((deviceId) => ({ device_id: deviceId, shutdown: latestShutdown(sql, deviceId)! })) };
   }
 
   /** Withdraws a shutdown the Mac has not picked up yet. One already delivered cannot be called back. */
   async cancelShutdown(input: { sessionToken: string; deviceId: string; now: number }): Promise<CommandResult<{ shutdown: ShutdownState | null }>> {
     if (!(await this.sessionFor(input.sessionToken, input.now))) return { error: "bad_token", status: 401 };
-    this.ctx.storage.sql.exec(
-      "UPDATE device_command SET cancelled_at_ms = ? WHERE device_id = ? AND kind = 'shutdown' AND cancelled_at_ms IS NULL AND delivered_at_ms IS NULL",
-      input.now,
-      input.deviceId,
-    );
-    return { shutdown: this.latestShutdown(input.deviceId) };
-  }
-
-  /** Sets or clears (null) a Mac's daily scheduled shutdown. Like a shutdown, only a login session may. */
-  async setShutdownSchedule(input: { sessionToken: string; deviceId: string; schedule: unknown; now: number }): Promise<CommandResult<{ shutdown_schedule: ShutdownSchedule | null }>> {
-    if (!(await this.sessionFor(input.sessionToken, input.now))) return { error: "bad_token", status: 401 };
-    const device = this.ctx.storage.sql
-      .exec<{ platform: string; revoked_at_ms: number | null }>("SELECT platform, revoked_at_ms FROM device WHERE device_id = ?", input.deviceId)
-      .toArray()[0];
-    if (!device) return { error: "no_such_device", status: 404 };
-    if (device.platform !== "macos") return { error: "not_supported", status: 422 };
-    const schedule = readShutdownSchedule(input.schedule);
-    if (schedule === "invalid") return { error: "bad_schedule", status: 422 };
-    this.ctx.storage.sql.exec(
-      "UPDATE device SET shutdown_schedule_json = ? WHERE device_id = ?",
-      schedule ? JSON.stringify(schedule) : null,
-      input.deviceId,
-    );
-    return { shutdown_schedule: schedule };
+    withdrawShutdown(this.ctx.storage.sql, input.deviceId, input.now);
+    return { shutdown: latestShutdown(this.ctx.storage.sql, input.deviceId) };
   }
 
   /**
-   * A device's own pending orders and its scheduled shutdown, plus what `settings` would say,
-   * so a Mac's regular check is one request. Also notes that the device is running.
+   * A device's own pending orders, plus what `settings` would say, so a Mac's regular check is one
+   * request. Also notes that the device is running. The plan comes along only when it changed since
+   * `planAtMs`, the version the Mac already has. `shutdown_schedule` is the plan's shutdown for today,
+   * in the shape Macs before the plan read.
    */
-  async pendingCommands(input: { deviceToken: string; pathDeviceId: string; now: number }): Promise<CommandResult<{
+  async pendingCommands(input: { deviceToken: string; pathDeviceId: string; now: number; planAtMs: number | null }): Promise<CommandResult<{
     commands: Array<{ command_id: string; kind: string; requested_at_ms: number }>;
     shutdown_schedule: ShutdownSchedule | null;
+    day_plan_updated_at_ms: number;
+    day_plan?: DayPlan;
     settings: { idle_threshold_ms: number; limit_ms: number | null; breaks_updated_at_ms: number };
   }>> {
     const device = await this.liveDevice(input.deviceToken, input.pathDeviceId);
     if ("error" in device) return device;
     const seen = this.ctx.storage.sql
-      .exec<{ last_seen_at_ms: number | null; shutdown_schedule_json: string | null }>(
-        "SELECT last_seen_at_ms, shutdown_schedule_json FROM device WHERE device_id = ?",
-        device.deviceId,
-      )
+      .exec<{ last_seen_at_ms: number | null }>("SELECT last_seen_at_ms FROM device WHERE device_id = ?", device.deviceId)
       .toArray()[0];
     if (!seen?.last_seen_at_ms || input.now - seen.last_seen_at_ms >= SEEN_EVERY_MS) {
       this.ctx.storage.sql.exec("UPDATE device SET last_seen_at_ms = ? WHERE device_id = ?", input.now, device.deviceId);
@@ -538,9 +559,15 @@ export class UserAccount extends DurableObject<Env> {
         device.deviceId,
       )
       .toArray();
+    const user = this.requireUser();
+    const plan = this.storedPlan();
+    const today = dayKey(input.now, user.timezone);
+    const weekday = new Date(`${today}T12:00:00Z`).getUTCDay();
     return {
       commands,
-      shutdown_schedule: this.storedSchedule(seen?.shutdown_schedule_json ?? null),
+      shutdown_schedule: legacyShutdown(plan.plan, today, weekday === 0 || weekday === 6),
+      day_plan_updated_at_ms: plan.updatedAtMs,
+      ...(input.planAtMs === plan.updatedAtMs ? {} : { day_plan: plan.plan }),
       settings: {
         idle_threshold_ms: this.requireUser().idle_threshold_ms,
         limit_ms: this.ceilingMs(input.now),
@@ -587,34 +614,6 @@ export class UserAccount extends DurableObject<Env> {
     return { deviceId: device.device_id };
   }
 
-  /** A stored schedule that no longer reads cleanly counts as none. */
-  private storedSchedule(json: string | null): ShutdownSchedule | null {
-    if (!json) return null;
-    const schedule = readShutdownSchedule(JSON.parse(json));
-    return schedule === "invalid" ? null : schedule;
-  }
-
-  private latestShutdown(deviceId: string): ShutdownState | null {
-    const row = this.ctx.storage.sql
-      .exec<{ command_id: string; requested_at_ms: number; cancelled_at_ms: number | null; delivered_at_ms: number | null; result: string | null }>(
-        "SELECT command_id, requested_at_ms, cancelled_at_ms, delivered_at_ms, result FROM device_command WHERE device_id = ? AND kind = 'shutdown' ORDER BY requested_at_ms DESC, rowid DESC LIMIT 1",
-        deviceId,
-      )
-      .toArray()[0];
-    if (!row) return null;
-    const state: ShutdownState["state"] =
-      row.cancelled_at_ms !== null ? "cancelled"
-      : row.delivered_at_ms === null ? "pending"
-      : row.result?.startsWith("failed:") ? "failed"
-      : "delivered";
-    return {
-      command_id: row.command_id,
-      state,
-      requested_at_ms: row.requested_at_ms,
-      delivered_at_ms: row.delivered_at_ms,
-      result: row.result,
-    };
-  }
 
   async setOwnLimit(input: { sessionToken: string; limitMs: number; now: number }): Promise<{ error: "bad_token" } | { budgetId: string; limitMs: number; effectiveAtMs: number }> {
     const session = await this.sessionFor(input.sessionToken, input.now);
@@ -811,6 +810,7 @@ export class UserAccount extends DurableObject<Env> {
   }
 
   private deviceInfo(): DeviceInfo[] {
+    const shutdowns = latestShutdowns(this.ctx.storage.sql);
     return this.ctx.storage.sql
       .exec<{
         device_id: string;
@@ -820,8 +820,7 @@ export class UserAccount extends DurableObject<Env> {
         last_upload_at_ms: number | null;
         last_seen_at_ms: number | null;
         revoked_at_ms: number | null;
-        shutdown_schedule_json: string | null;
-      }>("SELECT device_id, display_name, platform, created_at_ms, last_upload_at_ms, last_seen_at_ms, revoked_at_ms, shutdown_schedule_json FROM device ORDER BY created_at_ms, device_id")
+      }>("SELECT device_id, display_name, platform, created_at_ms, last_upload_at_ms, last_seen_at_ms, revoked_at_ms FROM device ORDER BY created_at_ms, device_id")
       .toArray()
       .map((row) => ({
         device_id: row.device_id,
@@ -831,8 +830,7 @@ export class UserAccount extends DurableObject<Env> {
         last_upload_at_ms: row.last_upload_at_ms,
         last_seen_at_ms: row.last_seen_at_ms,
         revoked: row.revoked_at_ms !== null,
-        shutdown: this.latestShutdown(row.device_id),
-        shutdown_schedule: this.storedSchedule(row.shutdown_schedule_json),
+        shutdown: shutdowns.get(row.device_id) ?? null,
       }));
   }
 

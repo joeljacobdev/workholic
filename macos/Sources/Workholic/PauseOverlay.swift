@@ -9,12 +9,40 @@ import QuartzCore
 /// Locked, it also blocks app switching, Force Quit, and logging out while it is up, and the
 /// buttons ask for the Mac's password first. Programs keep running and the Mac stays awake.
 /// It is a lock against someone at the keyboard, not against someone who can kill the app.
+///
+/// The same cover goes up outside the day plan's blocks, with its own words.
 @MainActor
 final class PauseOverlay: NSObject {
+    /// The words on the cover. The peek button is the outlined one, unpause the plain one below it.
+    struct Face: Equatable {
+        var title: String
+        var note: String
+        /// Before the time the cover has been up, as in "Paused for 12m".
+        var elapsed: String
+        var peek: String
+        var unpause: String
+
+        static func pause(locked: Bool) -> Face {
+            Face(
+                title: "Paused",
+                note: locked
+                    ? "Locked. Your Mac stays awake and this time is not counted. Unpausing asks for your Mac password."
+                    : "Your Mac stays awake. This time is not counted.",
+                elapsed: "Paused for",
+                peek: "Unpause for 5 minutes",
+                unpause: "Unpause"
+            )
+        }
+    }
+
     var onUnpause: (() -> Void)?
     var onPeek: (() -> Void)?
     var backlight: Backlight?
     private var windows: [NSWindow] = []
+    private var face = Face.pause(locked: false)
+    private var titles: [NSTextField] = []
+    private var peekButtons: [NSButton] = []
+    private var unpauseButtons: [NSButton] = []
     private var elapsedLabels: [NSTextField] = []
     private var notes: [NSTextField] = []
     private var dots: [CALayer] = []
@@ -58,9 +86,10 @@ final class PauseOverlay: NSObject {
         )
     }
 
-    func show(since: Date, locked: Bool) {
+    func show(since: Date, locked: Bool, face: Face? = nil) {
         self.since = since
         self.locked = locked
+        self.face = face ?? .pause(locked: locked)
         // A pause going up anew starts dark, even if the last one was woken a moment ago.
         if !up { lastInput = .distantPast }
         up = true
@@ -72,11 +101,17 @@ final class PauseOverlay: NSObject {
             window.orderFrontRegardless()
         }
         refreshElapsed()
-        let note = locked
-            ? "Locked. Your Mac stays awake and this time is not counted. Unpausing asks for your Mac password."
-            : "Your Mac stays awake. This time is not counted."
         for field in notes {
-            field.stringValue = note
+            field.stringValue = self.face.note
+        }
+        for field in titles {
+            field.stringValue = self.face.title
+        }
+        for button in peekButtons {
+            setTitle(button, self.face.peek, outlined: true)
+        }
+        for button in unpauseButtons {
+            setTitle(button, self.face.unpause, outlined: false)
         }
         // The screen goes dark once the cover is seen to be on every display.
         checkSoon()
@@ -221,7 +256,7 @@ final class PauseOverlay: NSObject {
         let wasPrompting = prompting
         rebuildNext = rebuilding
         keepFocus = wasPrompting
-        show(since: since, locked: locked)
+        show(since: since, locked: locked, face: face)
         keepFocus = false
         if wasPrompting { makeRoomForPrompt(true) }
     }
@@ -235,7 +270,7 @@ final class PauseOverlay: NSObject {
     }
 
     private func refreshElapsed() {
-        let text = "Paused for \(formatDuration(Int64(Date().timeIntervalSince(since) * 1000)))"
+        let text = "\(face.elapsed) \(formatDuration(Int64(Date().timeIntervalSince(since) * 1000)))"
         for label in elapsedLabels {
             label.stringValue = text
         }
@@ -265,6 +300,9 @@ final class PauseOverlay: NSObject {
         windows = []
         elapsedLabels = []
         notes = []
+        titles = []
+        peekButtons = []
+        unpauseButtons = []
         dots = []
         for screen in screens {
             let window = OverlayWindow(
@@ -298,7 +336,7 @@ final class PauseOverlay: NSObject {
             dot.opacity = 0.12
             content.layer?.addSublayer(dot)
 
-            let title = label("Paused", size: 30, white: 0.5, weight: .medium)
+            let title = label(face.title, size: 30, white: 0.5, weight: .medium)
             title.frame = NSRect(x: 0, y: size.height / 2 + 16, width: size.width, height: 40)
             let note = label("", size: 15, white: 0.32, weight: .regular)
             note.frame = NSRect(x: 0, y: size.height / 2 - 14, width: size.width, height: 22)
@@ -307,9 +345,9 @@ final class PauseOverlay: NSObject {
             elapsed.font = NSFont.monospacedDigitSystemFont(ofSize: 14, weight: .regular)
             elapsed.frame = NSRect(x: 0, y: size.height / 2 - 40, width: size.width, height: 20)
 
-            let peek = button("Unpause for 5 minutes", action: #selector(peek), outlined: true)
+            let peek = button(face.peek, action: #selector(peek), outlined: true)
             peek.frame = NSRect(x: size.width / 2 - 120, y: 104, width: 240, height: 36)
-            let unpause = button("Unpause", action: #selector(unpause), outlined: false)
+            let unpause = button(face.unpause, action: #selector(unpause), outlined: false)
             unpause.frame = NSRect(x: size.width / 2 - 120, y: 60, width: 240, height: 32)
 
             for view in [title, note, elapsed, peek, unpause] {
@@ -318,6 +356,9 @@ final class PauseOverlay: NSObject {
             window.contentView = content
             windows.append(window)
             elapsedLabels.append(elapsed)
+            titles.append(title)
+            peekButtons.append(peek)
+            unpauseButtons.append(unpause)
             dots.append(dot)
         }
     }
@@ -339,6 +380,11 @@ final class PauseOverlay: NSObject {
             button.layer?.borderWidth = 1
             button.layer?.borderColor = NSColor(calibratedWhite: 0.3, alpha: 1).cgColor
         }
+        setTitle(button, title, outlined: outlined)
+        return button
+    }
+
+    private func setTitle(_ button: NSButton, _ title: String, outlined: Bool) {
         button.attributedTitle = NSAttributedString(
             string: title,
             attributes: [
@@ -346,6 +392,5 @@ final class PauseOverlay: NSObject {
                 .font: NSFont.systemFont(ofSize: 15, weight: outlined ? .medium : .regular),
             ]
         )
-        return button
     }
 }

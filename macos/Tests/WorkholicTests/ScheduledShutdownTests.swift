@@ -107,6 +107,28 @@ final class ScheduledShutdownTests: XCTestCase {
         XCTAssertEqual(status, .missed)
     }
 
+    func testAChangedRuleAlreadyPastWaitsForTomorrow() {
+        var watch = ShutdownWatch()
+        (watch, _) = shutdownStep(watch, day: "2026-10-17", gateOpen: false)
+        watch = shutdownRuleChanged(watch)
+        let (next, status) = shutdownStep(watch, day: "2026-10-17", gateOpen: true)
+        XCTAssertEqual(status, .missed, "a time set to one already past today does not fire at once")
+        let (tomorrow, waiting) = shutdownStep(next, day: "2026-10-18", gateOpen: false)
+        XCTAssertEqual(waiting, .waiting)
+        XCTAssertEqual(shutdownStep(tomorrow, day: "2026-10-18", gateOpen: true).1, .ready)
+    }
+
+    func testAChangedRuleStillAheadFiresToday() {
+        var watch = shutdownRuleChanged(ShutdownWatch(armedDay: "2026-10-17"))
+        (watch, _) = shutdownStep(watch, day: "2026-10-17", gateOpen: false)
+        XCTAssertEqual(shutdownStep(watch, day: "2026-10-17", gateOpen: true).1, .ready)
+    }
+
+    func testAChangedRuleKeepsTheDoneDay() {
+        let watch = shutdownRuleChanged(ShutdownWatch(armedDay: "2026-10-17", doneDay: "2026-10-17"))
+        XCTAssertEqual(shutdownStep(watch, day: "2026-10-17", gateOpen: false).1, .done)
+    }
+
     func testOnceADay() {
         let watch = ShutdownWatch(armedDay: "2026-10-17", doneDay: "2026-10-17")
         XCTAssertEqual(shutdownStep(watch, day: "2026-10-17", gateOpen: true).1, .done)

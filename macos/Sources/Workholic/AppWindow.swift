@@ -9,8 +9,6 @@ final class AppWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler, WKNav
     /// What the page asked the Mac to do.
     enum Request {
         case openAtLogin(Bool)
-        case budgetMode(dynamic: Bool)
-        case planToday
         case logOut
         /// The page saved something the Mac reads, such as breaks or the limit.
         case saved
@@ -105,8 +103,6 @@ final class AppWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler, WKNav
         let request: Request
         switch action {
         case "openAtLogin": request = .openAtLogin(value as? Bool ?? false)
-        case "budgetMode": request = .budgetMode(dynamic: value as? String == "dynamic")
-        case "planToday": request = .planToday
         case "logOut": request = .logOut
         case "saved": request = .saved
         case "pauseLocks": request = .pauseLocks(value as? Bool ?? false)

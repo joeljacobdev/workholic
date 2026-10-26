@@ -83,25 +83,31 @@ struct BreakSettingsPayload: Codable {
     }
 }
 
-/// One-time orders for this Mac, such as a shutdown asked for on the web, and its daily scheduled shutdown.
+/// One-time orders for this Mac, such as a shutdown asked for on the web, and the account's day plan.
 struct CommandsResponse: Decodable {
     var commands: [DeviceCommand]
-    /// Nil when none is set, when an older server leaves it out, or when it does not read:
-    /// a bad schedule must not stop the orders from being read.
-    var shutdownSchedule: ShutdownRule?
+    /// The plan's version. Nil from a server before plans.
+    var dayPlanUpdatedAtMs: Int64?
+    /// Sent only when the version differs from the one asked with. `.some(nil)` when it was sent but
+    /// does not read: a bad plan must not stop the orders from being read, and counts as no plan.
+    var dayPlan: AccountPlan??
     /// What `/v1/settings` would say, so one request does both. Nil from a server before this field.
     var settings: CheckedSettings?
 
     enum CodingKeys: String, CodingKey {
         case commands
-        case shutdownSchedule = "shutdown_schedule"
+        case dayPlanUpdatedAtMs = "day_plan_updated_at_ms"
+        case dayPlan = "day_plan"
         case settings
     }
 
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         commands = try values.decode([DeviceCommand].self, forKey: .commands)
-        shutdownSchedule = (try? values.decodeIfPresent(ShutdownRule.self, forKey: .shutdownSchedule)) ?? nil
+        dayPlanUpdatedAtMs = try? values.decodeIfPresent(Int64.self, forKey: .dayPlanUpdatedAtMs)
+        if values.contains(.dayPlan) {
+            dayPlan = .some(try? values.decode(AccountPlan.self, forKey: .dayPlan))
+        }
         settings = try? values.decodeIfPresent(CheckedSettings.self, forKey: .settings)
     }
 }
@@ -209,8 +215,13 @@ struct ApiClient {
         return try await decode(request)
     }
 
-    func commands(deviceToken: String, deviceId: String) async throws -> CommandsResponse {
-        try await send(path: "/v1/devices/\(deviceId)/commands", method: "GET", token: deviceToken, body: nil)
+    /// `planAt` is the plan version this Mac has; the plan comes back only when it changed.
+    func commands(deviceToken: String, deviceId: String, planAt: Int64?) async throws -> CommandsResponse {
+        var url = baseURL.appending(path: "/v1/devices/\(deviceId)/commands")
+        if let planAt { url.append(queryItems: [URLQueryItem(name: "plan_at", value: String(planAt))]) }
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(deviceToken)", forHTTPHeaderField: "Authorization")
+        return try await decode(request)
     }
 
     /// "delivered" before acting; "failed:<reason>" after, if acting failed.

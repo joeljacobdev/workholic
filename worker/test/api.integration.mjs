@@ -226,8 +226,11 @@ try {
   assert.equal(page.status, 200);
   assert.match(await page.text(), /id="login-form"/);
   assert.match(page.headers.get("content-security-policy") ?? "", /script-src 'self'/);
-  const script = await fetch(`${base}/app.js`);
-  assert.equal(script.status, 200);
+  for (const module of ["main", "core", "day", "history", "devices", "breaks", "settings", "plan", "dialog", "tip"]) {
+    const script = await fetch(`${base}/js/${module}.js`);
+    assert.equal(script.status, 200, module);
+    assert.equal(script.headers.get("cache-control"), "no-cache", `${module} is checked on every load`);
+  }
   const unknownApi = await request("/v1/nope");
   assert.equal(unknownApi.status, 404);
 
@@ -311,19 +314,64 @@ try {
   assert.equal(shown.shutdown.result, "failed:-128");
   assert.ok(shown.last_seen_at_ms > 0, "polling marks the device as seen");
 
-  // Scheduled shutdown: a session sets it per device, and that device reads it with its orders.
-  const schedulePath = `/v1/devices/${deviceId}/shutdown-schedule`;
-  const schedule = { when: "limit", after: null, delay_minutes: 30, command: "last-call-end" };
-  assert.equal(shown.shutdown_schedule, null, "no schedule until one is set");
-  assert.equal((await request(schedulePath, { method: "PUT", token: device, body: { schedule } })).status, 401, "a device token cannot set a schedule");
-  assert.equal((await request(schedulePath, { method: "PUT", token: web, body: { schedule: { after: "22:00", command: "../x" } } })).status, 422);
-  assert.equal((await request(`/v1/devices/${otherId}/shutdown-schedule`, { method: "PUT", token: web, body: { schedule } })).status, 404);
-  assert.deepEqual((await request(schedulePath, { method: "PUT", token: web, body: { schedule } })).body.shutdown_schedule, schedule);
-  assert.deepEqual((await request(commandsPath, { token: device })).body.shutdown_schedule, schedule, "the Mac reads its schedule");
-  const listed = (await request("/v1/stats", { token: web })).body.device_info.find((info) => info.device_id === deviceId);
-  assert.deepEqual(listed.shutdown_schedule, schedule);
-  assert.equal((await request(schedulePath, { method: "PUT", token: web, body: { schedule: null } })).body.shutdown_schedule, null);
+  // The day plan: one for the account, set with a session, read by every Mac with its orders.
+  const secondId = "2c4e6a8b-0d1f-4a3b-8c5d-7e9f0a1b2c3d";
+  const second = (await request("/v1/devices", {
+    method: "POST",
+    token: web,
+    body: { device_id: secondId, display_name: "studio", platform: "macos", role: "collector" },
+  })).body.device_token;
+  const both = [deviceId, secondId];
+  assert.equal(shown.shutdown_schedule, undefined, "Macs no longer have schedules of their own");
+  const fresh = await request(commandsPath, { token: device });
+  assert.equal(fresh.body.day_plan_updated_at_ms, 0, "no plan saved yet");
+  assert.equal(fresh.body.day_plan.mode, "limit", "the default is a limit and nothing else");
+  assert.equal(fresh.body.shutdown_schedule, null);
+  assert.equal((await request(`${commandsPath}?plan_at=0`, { token: device })).body.day_plan, undefined, "a Mac with the latest plan is not sent it again");
+
+  const nightly = { mode: "limit", shutdown: "time", at: 1380, command: "last-call-end" };
+  assert.equal((await request("/v1/day-plan", { method: "PUT", token: device, body: { plan: nightly } })).status, 401, "a device token cannot set the plan");
+  assert.equal((await request("/v1/day-plan", { method: "PUT", token: web, body: { plan: { ...nightly, command: "../x" } } })).status, 422);
+  assert.equal((await request("/v1/day-plan", { method: "PUT", token: web, body: { plan: nightly, limit_ms: -5 } })).status, 422);
+  assert.equal((await request("/v1/day-plan", { method: "PUT", token: web, body: {} })).status, 422);
+  const savedPlan = await request("/v1/day-plan", { method: "PUT", token: web, body: { plan: nightly, limit_ms: 5 * 3_600_000 } });
+  assert.equal(savedPlan.status, 200);
+  assert.equal(savedPlan.body.limit_ms, 5 * 3_600_000, "the limit is saved with the plan");
+  assert.equal(savedPlan.body.day_plan.at, 1380);
+  const planAt = savedPlan.body.day_plan_updated_at_ms;
+  const legacy = { when: "time", after: "23:00", delay_minutes: 0, command: "last-call-end" };
+  for (const [path, token] of [[commandsPath, device], [`/v1/devices/${secondId}/commands`, second]]) {
+    const check = (await request(path, { token })).body;
+    assert.equal(check.day_plan.shutdown, "time", "every Mac gets the one plan");
+    assert.deepEqual(check.shutdown_schedule, legacy, "older Macs get it as a clock time");
+  }
+  assert.equal((await request(`${commandsPath}?plan_at=${planAt}`, { token: device })).body.day_plan, undefined);
+  assert.equal((await request(`${commandsPath}?plan_at=${planAt - 1}`, { token: device })).body.day_plan.at, 1380, "an older copy is replaced");
+  const viaSettings = (await request("/v1/settings", { token: web })).body;
+  assert.equal(viaSettings.day_plan_updated_at_ms, planAt);
+  assert.equal(viaSettings.limit_ms, 5 * 3_600_000);
+  const sameLimit = await request("/v1/day-plan", { method: "PUT", token: web, body: { plan: { mode: "planner", weekdays: [[540, 1080]], weekends: [[540, 1080]], shutdown: "last_block" }, limit_ms: 5 * 3_600_000 } });
+  assert.equal(sameLimit.body.day_plan.mode, "planner");
+  assert.equal((await request(commandsPath, { token: device })).body.shutdown_schedule.after, "18:00", "after the last block, as a clock time for older Macs");
+  await request("/v1/day-plan", { method: "PUT", token: web, body: { plan: { mode: "limit" } } });
   assert.equal((await request(commandsPath, { token: device })).body.shutdown_schedule, null, "turned off");
+
+  // Several Macs at once: one shutdown for every Mac named, or for none.
+  assert.equal((await request("/v1/shutdowns", { method: "POST", token: device, body: { device_ids: both } })).status, 401, "a device token cannot ask for shutdowns");
+  assert.equal((await request("/v1/shutdowns", { method: "POST", token: web, body: { device_ids: [secondId, otherId] } })).status, 404);
+  assert.deepEqual((await request(`/v1/devices/${secondId}/commands`, { token: second })).body.commands, [], "an unknown Mac in the list asks none");
+  const askedBoth = await request("/v1/shutdowns", { method: "POST", token: web, body: { device_ids: both } });
+  assert.equal(askedBoth.status, 200);
+  assert.deepEqual(askedBoth.body.shutdowns.map((entry) => [entry.device_id, entry.shutdown.state]), [[deviceId, "pending"], [secondId, "pending"]]);
+  const askedBothAgain = await request("/v1/shutdowns", { method: "POST", token: web, body: { device_ids: both } });
+  assert.deepEqual(
+    askedBothAgain.body.shutdowns.map((entry) => entry.shutdown.command_id),
+    askedBoth.body.shutdowns.map((entry) => entry.shutdown.command_id),
+    "asking twice keeps one order each",
+  );
+  const listedBoth = (await request("/v1/stats", { token: web })).body.device_info;
+  assert.deepEqual(listedBoth.map((info) => info.shutdown?.state), ["pending", "pending"], "the device list shows each Mac's latest");
+  for (const id of both) await request(`/v1/devices/${id}/shutdown`, { method: "DELETE", token: web });
 
   const loggedOut = await request("/v1/logout", { method: "POST", token: relogin.body.session_token });
   assert.equal(loggedOut.status, 200);

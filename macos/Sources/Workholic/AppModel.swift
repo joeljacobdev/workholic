@@ -28,13 +28,14 @@ final class AppModel {
     private var reminderConfig = ReminderConfig()
     private let overlay = BreakOverlay()
     private let editor = BreakEditor()
-    private var budgetMode = BudgetStore.mode()
-    private var dayPlan = BudgetStore.plan()
-    private let dayEditor = DayPlanEditor()
+    /// The account's day plan, the same on every Mac, and its version as last heard.
+    private var accountPlan = PlanStore.plan()
+    private var accountPlanAt = PlanStore.updatedAt()
+    /// "15 more minutes" or an unlock, outside the plan's blocks.
+    private var plannerPass = PlanStore.pass()
+    /// Set while the cover for outside the blocks is up. It shares the pause cover, never at the same time.
+    private var planCoverSince: Date?
     private let appWindow = AppWindow()
-    private var civilDaySeen = civilDay(Date())
-    /// A day-start prompt was due while a pause or a call had the screen.
-    private var dayPlanDeferred = false
     private var countdownTimer: Timer?
     private var covering = false
     /// When the last countdown second ran. A scheduled pause counts down by the wall clock, sleep included.
@@ -59,8 +60,8 @@ final class AppModel {
     /// Runs during "Unpause for 5 minutes", then brings the pause cover back.
     private var peekTimer: Timer?
     var onChange: (() -> Void)?
-    /// This Mac's daily scheduled shutdown, as last heard from the account.
-    private var shutdownRule = ShutdownSchedule.load()
+    /// Today's scheduled shutdown from the plan, as of the last tick. A change re-arms the watch.
+    private var shutdownRule: ShutdownRule?
     /// Where today's scheduled shutdown stands. Only the done day outlives a restart.
     private var shutdownWatch = ShutdownWatch(doneDay: UserDefaults.standard.string(forKey: AppModel.shutdownDoneKey))
     private let shutdownWarning = ShutdownWarning()
@@ -99,12 +100,19 @@ final class AppModel {
         editor.onSave = { [weak self] saved in self?.replacePlan(saved) }
         overlay.onSkip = { [weak self] in self?.skipActiveBreak() }
         overlay.onSnooze = { [weak self] in self?.snoozeActiveBreak() }
-        pauseOverlay.onUnpause = { [weak self] in self?.unlock(then: .unpause) }
-        pauseOverlay.onPeek = { [weak self] in self?.unlock(then: .peek) }
+        pauseOverlay.onUnpause = { [weak self] in
+            guard let self else { return }
+            self.unlock(then: self.planCovering ? .planUnlock : .unpause)
+        }
+        pauseOverlay.onPeek = { [weak self] in
+            guard let self else { return }
+            if self.planCovering { self.planMore() } else { self.unlock(then: .peek) }
+        }
         backlight.restoreAfterCrash()
         overlay.backlight = backlight
         pauseOverlay.backlight = backlight
-        dayEditor.onSave = { [weak self] saved in self?.replaceDayPlan(saved) }
+        PlanStore.dropOldKeys()
+        shutdownRule = todayShutdownRule(now: Date())
         appWindow.onRequest = { [weak self] request in self?.handle(request) }
         shutdownWarning.onCancel = { [weak self] in self?.noteShutdown("Scheduled shutdown cancelled for today.") }
         shutdownWarning.onShutDown = { [weak self] in self?.runScheduledShutdown() }
@@ -127,7 +135,6 @@ final class AppModel {
             MainActor.assumeIsolated { self?.checkIfDue() }
         }
         scheduleSync()
-        promptDayPlanIfNeeded()
     }
 
     func stop() {
@@ -146,29 +153,35 @@ final class AppModel {
 
     var signedIn: Bool { TokenStore.get("session") != nil }
 
-    var usesTasks: Bool { budgetMode == .dynamic }
-
-    var hasTodayPlan: Bool {
-        budgetForDay(dayPlan, today: civilDay(Date())) != nil
-    }
-
     /// Short text beside the menu bar icon. Nil shows the icon alone.
     var statusBadge: String? {
         if isPaused { return "Paused" }
         if covering { return "Break" }
+        if planCovering { return "Off plan" }
         return nil
     }
 
-    /// Today's looking and the ceiling it counts against.
-    /// Fixed mode counts every device: the account's last merge, or this Mac if it is ahead.
-    /// Dynamic mode uses today's task total and this Mac only. That total is not the standing limit.
+    /// Today's looking, across every device: the account's last merge, or this Mac if it is ahead.
+    /// It counts against the daily limit, or with the planner, the time today's blocks add up to.
     func todayUsage(now: Date = Date()) -> (usedMs: Int64, ceilingMs: Int64?) {
         let range = dayRange(now)
         let local = store.attendedMs(dayStart: range.start, dayEnd: range.end)
-        if budgetMode == .dynamic {
-            return (local, budgetForDay(dayPlan, today: civilDay(now)).map { dayBudgetMs($0.tasks) })
-        }
-        return (max(syncedCreditedMs ?? 0, local), ceilingMs)
+        let ceiling = accountPlan.mode == .planner ? Int64(plannedMinutes(todayBlocks(now))) * 60_000 : ceilingMs
+        return (max(syncedCreditedMs ?? 0, local), ceiling)
+    }
+
+    /// The plan's blocks for today on this Mac's calendar.
+    private func todayBlocks(_ now: Date) -> [[Int]] {
+        blocksFor(accountPlan, day: civilDay(now), weekend: Calendar.current.isDateInWeekend(now))
+    }
+
+    private func todayShutdownRule(now: Date) -> ShutdownRule? {
+        planShutdownRule(accountPlan, blocks: todayBlocks(now))
+    }
+
+    private func minuteOfDay(_ now: Date) -> Int {
+        let parts = Calendar.current.dateComponents([.hour, .minute], from: now)
+        return (parts.hour ?? 0) * 60 + (parts.minute ?? 0)
     }
 
     /// How much of today's budget is used, for the menu bar gauge. Nil when no budget is set.
@@ -218,8 +231,13 @@ final class AppModel {
         defaults.removeObject(forKey: Self.breaksDirtyKey)
         defaults.removeObject(forKey: Self.breaksSyncedAtKey)
         defaults.removeObject(forKey: Self.breaksEditedAtKey)
+        PlanStore.clear()
+        accountPlan = AccountPlan()
+        accountPlanAt = nil
+        plannerPass = nil
+        lowerPlanCover()
         shutdownRule = nil
-        ShutdownSchedule.save(nil)
+        shutdownWatch = shutdownRuleChanged(shutdownWatch)
         ceilingMs = nil
         syncedCreditedMs = nil
         problem = nil
@@ -245,8 +263,6 @@ final class AppModel {
             "version": appVersion(),
             "openAtLogin": LoginItem.isOn,
             "openAtLoginNeedsApproval": LoginItem.needsApproval,
-            "budgetMode": usesTasks ? "dynamic" : "fixed",
-            "hasTodayPlan": hasTodayPlan,
             "pauseLocks": pauseLocks,
         ]
     }
@@ -255,10 +271,6 @@ final class AppModel {
         switch request {
         case .openAtLogin(let on):
             LoginItem.set(on)
-        case .budgetMode(let dynamic):
-            if dynamic { useDynamicBudget() } else { useFixedBudget() }
-        case .planToday:
-            editDayPlan()
         case .logOut:
             logout()
             return
@@ -276,12 +288,13 @@ final class AppModel {
     func menuLines() -> [String] {
         var lines: [String] = []
         let usage = todayUsage()
-        if let ceiling = usage.ceilingMs {
+        if accountPlan.mode == .planner {
+            lines.append("Today: \(formatDuration(usage.usedMs)) of \(formatDuration(usage.ceilingMs ?? 0)) planned")
+            lines.append(planLine(now: Date()))
+        } else if let ceiling = usage.ceilingMs {
             var line = "Today: \(formatDuration(usage.usedMs)) of \(formatDuration(ceiling))"
             if usage.usedMs > ceiling { line += ", \(formatDuration(usage.usedMs - ceiling)) over" }
             lines.append(line)
-        } else if usesTasks {
-            lines.append("Today: \(formatDuration(usage.usedMs)). Plan today to set a budget.")
         } else {
             lines.append("Today: \(formatDuration(usage.usedMs))")
         }
@@ -319,40 +332,74 @@ final class AppModel {
         ms < 60_000 ? "less than a minute" : formatDuration(ms)
     }
 
-    func useFixedBudget() {
-        guard budgetMode != .fixed else { return }
-        budgetMode = .fixed
-        BudgetStore.setMode(.fixed)
-        dayPlanDeferred = false
-        onChange?()
+    /// Where today's plan stands: in a block, between them, or done.
+    private func planLine(now: Date) -> String {
+        let blocks = todayBlocks(now)
+        let minute = minuteOfDay(now)
+        if let block = blocks.first(where: { $0[0] <= minute && minute < $0[1] }) {
+            return "In a block until \(minuteText(block[1]))."
+        }
+        let next = nextBlockStart(blocks, minute: minute)
+        if let pass = plannerPass, pass.day == civilDay(now), minute < pass.untilMinute {
+            return "Outside your plan, unlocked until \(minuteText(min(pass.untilMinute, 1439)))."
+        }
+        if let next { return "Next block at \(minuteText(next))." }
+        return blocks.isEmpty ? "No blocks planned today." : "Today's blocks are done."
     }
 
-    func useDynamicBudget() {
-        budgetMode = .dynamic
-        BudgetStore.setMode(.dynamic)
-        onChange?()
-        promptDayPlanIfNeeded()
+    /// The cover outside the blocks. Its plain button unlocks with the password until the next block.
+    private func planFace(now: Date) -> PauseOverlay.Face {
+        let next = nextBlockStart(todayBlocks(now), minute: minuteOfDay(now))
+        return PauseOverlay.Face(
+            title: "Outside your plan",
+            note: next.map { "Next block at \(minuteText($0)). This time is not counted." }
+                ?? "Today's blocks are done. This time is not counted.",
+            elapsed: "Covered for",
+            peek: "15 more minutes",
+            unpause: next.map { "Unlock until \(minuteText($0))" } ?? "Unlock for today"
+        )
     }
 
-    func editDayPlan() {
-        let today = civilDay(Date())
-        let tasks = budgetForDay(dayPlan, today: today)?.tasks ?? []
-        dayEditor.show(day: today, tasks: tasks)
-    }
+    /// The plan's cover is on the screen.
+    private var planCovering: Bool { planCoverSince != nil }
 
-    func replaceDayPlan(_ saved: DayBudget) {
-        let today = civilDay(Date())
-        guard saved.day == today else {
-            // That list was for another day. Ask again for today's.
-            dayPlanDeferred = true
-            onChange?()
+    /// Raised outside the blocks, lowered inside one or with a pass. A break, a call, or a pause of
+    /// one's own comes first; the cover waits for them. It does not keep the Mac awake or lock the keyboard.
+    private func checkPlanCover(now: Date) {
+        let covers = plannerCovers(
+            accountPlan, blocks: todayBlocks(now), day: civilDay(now), minute: minuteOfDay(now), pass: plannerPass
+        )
+        if !covers {
+            lowerPlanCover()
             return
         }
-        dayPlan = saved
-        BudgetStore.savePlan(saved)
-        dayPlanDeferred = false
-        appWindow.update(state: macState)
-        onChange?()
+        guard !planCovering, !covering, !onCall, !isPaused, !shuttingDown else { return }
+        store.seal()
+        planCoverSince = now
+        fitActivationPolicy()
+        pauseOverlay.show(since: now, locked: false, face: planFace(now: now))
+    }
+
+    private func lowerPlanCover() {
+        guard planCovering else { return }
+        planCoverSince = nil
+        unlockContext?.invalidate()
+        unlockContext = nil
+        pauseOverlay.hide()
+        fitActivationPolicy()
+    }
+
+    private func grantPass(_ pass: PlannerPass) {
+        plannerPass = pass
+        PlanStore.savePass(pass)
+        lowerPlanCover()
+        tick()
+    }
+
+    /// "15 more minutes" outside the blocks. No password: it is short and comes back on its own.
+    private func planMore() {
+        let now = Date()
+        grantPass(morePass(day: civilDay(now), minute: minuteOfDay(now)))
     }
 
     func editBreaks() {
@@ -377,7 +424,7 @@ final class AppModel {
         onChange?()
     }
 
-    var canTakeBreak: Bool { reminder.activeBreak == nil && !pauseCovering }
+    var canTakeBreak: Bool { reminder.activeBreak == nil && !pauseCovering && !planCovering }
 
     /// A pause started from the menu bar. It covers the screen like any other and cannot be put off.
     func takeBreak(minutes: Int) {
@@ -401,23 +448,26 @@ final class AppModel {
     var blocksQuit: Bool { pauseCovering && pauseLocks }
 
     /// A break or the pause cover is on the screen. Hiding the app would take it down and leave only the dimmed backlight.
-    var coverIsUp: Bool { covering || pauseCovering }
+    var coverIsUp: Bool { covering || pauseCovering || planCovering }
 
-    enum Unlocked: Sendable { case unpause, peek }
+    enum Unlocked: Sendable { case unpause, peek, planUnlock }
 
     private func proceed(_ next: Unlocked) {
         switch next {
         case .unpause: unpause()
         case .peek: peek()
+        case .planUnlock:
+            let now = Date()
+            grantPass(unlockPass(todayBlocks(now), day: civilDay(now), minute: minuteOfDay(now)))
         }
     }
 
-    /// Asks for the Mac's password (or Touch ID) before leaving a locked pause.
-    /// A Mac with no password to ask for does not lock anyone out.
+    /// Asks for the Mac's password (or Touch ID) before leaving a locked pause, and always before
+    /// unlocking outside the plan. A Mac with no password to ask for does not lock anyone out.
     /// A click while a prompt is already open means that prompt is out of sight, perhaps on another
     /// display, so the old one is closed and a new one asked; ignoring the click left Unpause dead.
     private func unlock(then next: Unlocked) {
-        guard pauseLocks else { return proceed(next) }
+        guard pauseLocks || next == .planUnlock else { return proceed(next) }
         unlockContext?.invalidate()
         unlockContext = nil
         let context = LAContext()
@@ -427,13 +477,15 @@ final class AppModel {
         let attempt = unlockAttempt
         unlockContext = context
         pauseOverlay.makeRoomForPrompt(true)
-        context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "unlock the paused screen") { ok, _ in
+        let reason = next == .planUnlock ? "use this Mac outside your plan" : "unlock the paused screen"
+        context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { ok, _ in
             Task { @MainActor [weak self] in
                 guard let self, attempt == self.unlockAttempt else { return }
                 self.unlockContext = nil
                 if ok {
-                    self.proceed(next)
-                } else if self.pauseCovering {
+                    // The cover may have come down while the prompt was up, at a block's start.
+                    if next != .planUnlock || self.planCovering { self.proceed(next) }
+                } else if self.pauseCovering || self.planCovering {
                     self.pauseOverlay.makeRoomForPrompt(false)
                     NSApp.activate(ignoringOtherApps: true)
                 }
@@ -447,6 +499,8 @@ final class AppModel {
     /// Away while an agent works: the Mac stays awake, the screen is covered, and nothing counts.
     func pause() {
         guard pausedSince == nil else { return }
+        // A pause of one's own takes the cover over; the plan's comes back after the unpause if still due.
+        lowerPlanCover()
         pausedSince = Date()
         power.hold(reason: "Workholic is paused while you are away.")
         coverForPause()
@@ -545,10 +599,11 @@ final class AppModel {
         defer { commandsBusy = false }
         let api = ApiClient(baseURL: ApiOrigin.baseURL)
         // A failed check is retried with the next one. It never signs out: that is the session's job.
-        guard let pending = try? await api.commands(deviceToken: device, deviceId: deviceId) else { return true }
-        if pending.shutdownSchedule != shutdownRule {
-            shutdownRule = pending.shutdownSchedule
-            ShutdownSchedule.save(shutdownRule)
+        guard let pending = try? await api.commands(
+            deviceToken: device, deviceId: deviceId, planAt: accountPlanAt
+        ) else { return true }
+        if let at = pending.dayPlanUpdatedAtMs, let sent = pending.dayPlan {
+            adoptPlan(sent.flatMap { validAccountPlan($0) ? $0 : nil } ?? AccountPlan(), at: at)
         }
         for command in pending.commands where command.kind == "shutdown" {
             guard let ack = try? await api.ackCommand(
@@ -565,6 +620,15 @@ final class AppModel {
             api: api
         )
         return true
+    }
+
+    /// A plan that fails the Mac's own checks counts as none: a limit, no blocks, no shutdown.
+    private func adoptPlan(_ next: AccountPlan, at: Int64) {
+        accountPlanAt = at
+        PlanStore.save(next, updatedAt: at)
+        guard next != accountPlan else { return }
+        accountPlan = next
+        tick()
     }
 
     /// Clears everything of Workholic's that would stand in the way: the covers, the locked pause's
@@ -588,6 +652,7 @@ final class AppModel {
         }
         endBreak()
         pausedSince = nil
+        planCoverSince = nil
         peekTimer?.invalidate()
         peekTimer = nil
         pauseOverlay.hide()
@@ -715,7 +780,7 @@ final class AppModel {
         store.seal()
         let (next, notices) = reminderStep(
             state: reminder,
-            tick: ReminderTick(slept: true, onCall: onCall || pauseCovering, displayAwake: false, dueBreak: plan.due),
+            tick: ReminderTick(slept: true, onCall: onCall || pauseCovering || planCovering, displayAwake: false, dueBreak: plan.due),
             config: reminderConfig
         )
         reminder = next
@@ -725,12 +790,10 @@ final class AppModel {
 
     @objc private func didWake() {
         tick()
-        promptDayPlanIfNeeded()
         checkSoon()
     }
 
     private func tick() {
-        noteDay(Date())
         let sample = machineSample()
         let previous = lastSample
         lastSample = sample
@@ -742,7 +805,7 @@ final class AppModel {
                 displayAwake: sample.displayAwake,
                 idleMs: sample.idleMs,
                 bundleId: sample.bundleId,
-                covered: covering || pauseCovering
+                covered: covering || pauseCovering || planCovering
             ),
             idleThresholdMs: config.idleThresholdMs
         )
@@ -766,14 +829,14 @@ final class AppModel {
         overtimeInCharge = over && plan.overtimeAfterMs > 0
         var stepConfig = reminderConfig
         if overtimeInCharge { stepConfig.breakAfterMs = 0 }
-        // The pause cover holds every break the way a call does.
+        // The pause and plan covers hold every break the way a call does.
         let (next, notices) = reminderStep(
             state: reminder,
             tick: ReminderTick(
                 attendedAddMs: attendedAddMs(step),
                 gapMs: gap,
                 slept: broke,
-                onCall: onCall || pauseCovering,
+                onCall: onCall || pauseCovering || planCovering,
                 displayAwake: sample.displayAwake,
                 dueBreak: overtimeInCharge ? nil : plan.due,
                 overLimit: over,
@@ -785,7 +848,13 @@ final class AppModel {
         reminder = next
         deliver(notices)
         openScheduled(now: now, displayAwake: sample.displayAwake)
-        if dayPlanDeferred { promptDayPlanIfNeeded() }
+        checkPlanCover(now: now)
+        // The plan, or the day and so its blocks, may have changed the shutdown since the last tick.
+        let rule = todayShutdownRule(now: now)
+        if rule != shutdownRule {
+            shutdownRule = rule
+            shutdownWatch = shutdownRuleChanged(shutdownWatch)
+        }
         checkScheduledShutdown(now: now)
         onChange?()
     }
@@ -806,13 +875,13 @@ final class AppModel {
         var over = false
         if rule.when == .limit {
             let usage = todayUsage(now: now)
-            guard let ceiling = usage.ceilingMs else {
+            guard let ceiling = committedMs(now: now) else {
                 shutdownNote = "Scheduled shutdown waits for a daily limit."
                 return
             }
-            // Signed in with the fixed limit, other devices count. Until the first sync that total is
-            // not known, and arming on a low local count could shut down right after launch.
-            if budgetMode == .fixed, signedIn, syncedCreditedMs == nil {
+            // Signed in, other devices count. Until the first sync that total is not known, and
+            // arming on a low local count could shut down right after launch.
+            if signedIn, syncedCreditedMs == nil {
                 shutdownNote = "Scheduled shutdown waits for today's total."
                 return
             }
@@ -933,14 +1002,14 @@ final class AppModel {
         guard plan.overtimeAfterMs > 0, let ceiling = committedMs(now: now) else { return false }
         let range = dayRange(now)
         let local = store.attendedMs(dayStart: range.start, dayEnd: range.end)
-        let used = budgetMode == .dynamic ? local : max(local, syncedCreditedMs ?? 0)
-        return used >= ceiling
+        return max(local, syncedCreditedMs ?? 0) >= ceiling
     }
 
     /// A scheduled entry whose window is open now shows what is left of it. It does not open over
-    /// another pause, while one is snoozed, on a call, under the pause cover, or on a dark screen.
+    /// another pause, while one is snoozed, on a call, under a cover, or on a dark screen.
     private func openScheduled(now: Date, displayAwake: Bool) {
-        guard reminder.activeBreak == nil, reminder.snoozed == nil, !onCall, !pauseCovering, displayAwake else { return }
+        guard reminder.activeBreak == nil, reminder.snoozed == nil, !onCall, !pauseCovering, !planCovering,
+              displayAwake else { return }
         let entries = plan.scheduledEntries
         guard !entries.isEmpty else { return }
         let today = civilDay(now)
@@ -959,41 +1028,9 @@ final class AppModel {
         return Int64(seconds) * 1_000
     }
 
-    private func noteDay(_ now: Date) {
-        let today = civilDay(now)
-        guard today != civilDaySeen else { return }
-        civilDaySeen = today
-        guard budgetMode == .dynamic else { return }
-        if dayPlan?.day != today {
-            dayPlan = nil
-            BudgetStore.savePlan(nil)
-        }
-        promptDayPlanIfNeeded()
-    }
-
-    /// Opens the task list when this day has none. Launch, wake, and a new civil day ask.
-    /// Closing the window does not ask again until the next one of those.
-    private func promptDayPlanIfNeeded() {
-        guard budgetMode == .dynamic else {
-            dayPlanDeferred = false
-            return
-        }
-        let today = civilDay(Date())
-        guard budgetForDay(dayPlan, today: today) == nil else {
-            dayPlanDeferred = false
-            return
-        }
-        if covering || onCall || pauseCovering {
-            dayPlanDeferred = true
-            return
-        }
-        dayPlanDeferred = false
-        guard !dayEditor.isVisible else { return }
-        dayEditor.show(day: today, tasks: [])
-    }
-
+    /// The daily limit, which only limit mode has. The planner's blocks are not a limit.
     private func committedMs(now: Date) -> Int64? {
-        committedBudgetMs(mode: budgetMode, fixedMs: ceilingMs, dayPlan: dayPlan, today: civilDay(now))
+        accountPlan.mode == .limit ? ceilingMs : nil
     }
 
     func scheduleSync() {

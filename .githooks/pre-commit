@@ -1,0 +1,27 @@
+#!/bin/sh
+# Every commit carries the next version in version.txt, so a build of a commit says which one it is.
+# Builds and installs only read it. Turned on by `make hooks` (git config core.hooksPath .githooks).
+set -eu
+root=$(git rev-parse --show-toplevel)
+gitdir=$(git rev-parse --git-dir)
+
+# Merges, rebases, cherry-picks, and amends keep the version the commit already has.
+for state in MERGE_HEAD REBASE_HEAD CHERRY_PICK_HEAD rebase-merge rebase-apply; do
+  if [ -e "$gitdir/$state" ]; then exit 0; fi
+done
+case "$(ps -o args= -p "$PPID" 2>/dev/null || true)" in
+  *--amend*) exit 0 ;;
+esac
+
+# Nothing staged, nothing to version.
+if git diff --cached --quiet; then exit 0; fi
+
+head=$(git show HEAD:version.txt 2>/dev/null || echo 0)
+staged=$(git show :version.txt 2>/dev/null || echo 0)
+# Already changed by hand in this commit.
+if [ "$staged" != "$head" ]; then exit 0; fi
+
+next=$((head + 1))
+echo "$next" > "$root/version.txt"
+git add "$root/version.txt"
+echo "Version $next"

@@ -8,7 +8,7 @@
 /index.html
   Cache-Control: no-cache
 
-/app.js
+/js/*
   Cache-Control: no-cache
 
 /app.css

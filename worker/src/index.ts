@@ -82,10 +82,10 @@ export default {
       const shutdown = /^\/v1\/devices\/([0-9a-f-]{36})\/shutdown$/.exec(url.pathname);
       if (request.method === "POST" && shutdown) return await requestShutdown(request, env, shutdown[1]);
       if (request.method === "DELETE" && shutdown) return await cancelShutdown(request, env, shutdown[1]);
-      const schedule = /^\/v1\/devices\/([0-9a-f-]{36})\/shutdown-schedule$/.exec(url.pathname);
-      if (request.method === "PUT" && schedule) return await putShutdownSchedule(request, env, schedule[1]);
+      if (request.method === "PUT" && url.pathname === "/v1/day-plan") return await putDayPlan(request, env);
+      if (request.method === "POST" && url.pathname === "/v1/shutdowns") return await requestShutdowns(request, env);
       const commands = /^\/v1\/devices\/([0-9a-f-]{36})\/commands$/.exec(url.pathname);
-      if (request.method === "GET" && commands) return await pendingCommands(request, env, commands[1]);
+      if (request.method === "GET" && commands) return await pendingCommands(request, env, commands[1], url);
       const ack = /^\/v1\/devices\/([0-9a-f-]{36})\/commands\/([0-9a-f-]{36}):ack$/.exec(url.pathname);
       if (request.method === "POST" && ack) return await ackCommand(request, env, ack[1], ack[2]);
       return json({ error: "not_found" }, 404);
@@ -304,6 +304,8 @@ async function settings(request: Request, env: Env): Promise<Response> {
     idle_threshold_ms: result.idleThresholdMs,
     limit_ms: result.limitMs,
     breaks_updated_at_ms: result.breaksUpdatedAtMs,
+    day_plan: result.dayPlan,
+    day_plan_updated_at_ms: result.dayPlanUpdatedAtMs,
   });
 }
 
@@ -385,8 +387,20 @@ async function cancelShutdown(request: Request, env: Env, deviceId: string): Pro
   return commandResponse(await account(env, userId).cancelShutdown({ sessionToken: token, deviceId, now: Date.now() }));
 }
 
-/** Body `{ "schedule": { after, after_limit, command } }`, or `{ "schedule": null }` to turn it off. */
-async function putShutdownSchedule(request: Request, env: Env, deviceId: string): Promise<Response> {
+/** Body `{ "device_ids": [...] }`. Every one must be a signed-in Mac, or none is asked. */
+async function requestShutdowns(request: Request, env: Env): Promise<Response> {
+  const token = bearer(request);
+  if (!token) return json({ error: "bad_token" }, 401);
+  const userId = await userIdForToken(env, token);
+  if (!userId) return json({ error: "bad_token" }, 401);
+  const body = await readJson(request);
+  if (!body.ok) return body.response;
+  const deviceIds = asRecord(body.value)?.device_ids;
+  return commandResponse(await account(env, userId).requestShutdowns({ sessionToken: token, deviceIds, now: Date.now() }));
+}
+
+/** Body `{ "plan": {...}, "limit_ms"?: number }`: the account's plan, and its daily limit when given. */
+async function putDayPlan(request: Request, env: Env): Promise<Response> {
   const token = bearer(request);
   if (!token) return json({ error: "bad_token" }, 401);
   const userId = await userIdForToken(env, token);
@@ -394,19 +408,28 @@ async function putShutdownSchedule(request: Request, env: Env, deviceId: string)
   const body = await readJson(request);
   if (!body.ok) return body.response;
   const record = asRecord(body.value);
-  if (!record || !("schedule" in record)) return json({ error: "bad_schedule" }, 422);
+  if (!record) return json({ error: "bad_plan" }, 422);
   return commandResponse(
-    await account(env, userId).setShutdownSchedule({ sessionToken: token, deviceId, schedule: record.schedule, now: Date.now() }),
+    await account(env, userId).setDayPlan({ sessionToken: token, plan: record.plan, limitMs: record.limit_ms, now: Date.now() }),
   );
 }
 
-// A Mac reads and acknowledges only its own orders, with its device token.
-async function pendingCommands(request: Request, env: Env, deviceId: string): Promise<Response> {
+// A Mac reads and acknowledges only its own orders, with its device token. `?plan_at=` is the plan
+// version it already has, so the plan is sent only when it changed.
+async function pendingCommands(request: Request, env: Env, deviceId: string, url: URL): Promise<Response> {
   const token = bearer(request);
   if (!token) return json({ error: "bad_token" }, 401);
   const userId = await userIdForToken(env, token);
   if (!userId) return json({ error: "bad_token" }, 401);
-  return commandResponse(await account(env, userId).pendingCommands({ deviceToken: token, pathDeviceId: deviceId, now: Date.now() }));
+  const planAt = Number(url.searchParams.get("plan_at") ?? "");
+  return commandResponse(
+    await account(env, userId).pendingCommands({
+      deviceToken: token,
+      pathDeviceId: deviceId,
+      now: Date.now(),
+      planAtMs: url.searchParams.has("plan_at") && Number.isFinite(planAt) ? planAt : null,
+    }),
+  );
 }
 
 async function ackCommand(request: Request, env: Env, deviceId: string, commandId: string): Promise<Response> {

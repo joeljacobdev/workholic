@@ -139,6 +139,12 @@ public enum ShutdownStatus: Sendable, Equatable {
     case done
 }
 
+/// A rule that changes has to be seen shut again before it can fire, so one set to a time already
+/// past today waits for tomorrow instead of warning at once. A day already done stays done.
+public func shutdownRuleChanged(_ watch: ShutdownWatch) -> ShutdownWatch {
+    ShutdownWatch(armedDay: nil, doneDay: watch.doneDay)
+}
+
 public func shutdownStep(_ watch: ShutdownWatch, day: String, gateOpen: Bool) -> (ShutdownWatch, ShutdownStatus) {
     var next = watch
     if watch.doneDay == day { return (next, .done) }

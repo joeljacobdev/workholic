@@ -49,7 +49,7 @@ It is not the macOS lock screen. That screen cannot show Workholic's cover, and 
 
 ## Shutting a Mac down from the web
 
-Settings › Devices has "Shut down…" beside each Mac. It is for a Mac left on and paused, such as one running an agent, that should not stay on. The order waits on the server until that Mac picks it up: within about a minute if Workholic is running there and nobody is at it, within five minutes if someone is (opening the menu bar menu checks at once), otherwise the next time it runs while signed in. Cancel withdraws it until then.
+Settings › Devices has "Shut down now…" beside each Mac, and a box to pick several and shut them down together (`POST /v1/shutdowns`, all or none). It is for a Mac left on and paused, such as one running an agent, that should not stay on. The order waits on the server until that Mac picks it up: within about a minute if Workholic is running there and nobody is at it, within five minutes if someone is (opening the menu bar menu checks at once), otherwise the next time it runs while signed in. Cancel withdraws it until then.
 
 - Only a login session (the web app, or a Mac's dashboard window) can ask for or cancel a shutdown. A Mac's device token cannot, so a token taken from one Mac cannot shut down another.
 - A Mac reads only its own orders, with its device token (`GET /v1/devices/{id}/commands`).
@@ -57,18 +57,31 @@ Settings › Devices has "Shut down…" beside each Mac. It is for a Mac left on
 - To shut down, Workholic lifts its covers and the locked pause's kiosk mode, which would otherwise block it, and sends loginwindow the "shut down" Apple Event: the Apple menu's Shut Down without the dialog. Apps are asked to quit, so one with unsaved work can still stop it. If macOS refuses the request, the Mac reports it and the web shows that the shutdown did not go through.
 - Settings › Devices also shows when each Mac last checked in ("on now" within the last 7 minutes), from those checks.
 
-## Scheduled shutdown
+## Your day: one plan for every Mac
 
-Each Mac can shut itself down daily. It is set per device in Settings › Devices, where each Mac shows a one-line summary ("Daily shutdown: 30m after today's limit, or later if last-meeting-end says so") that opens into the form. It is stored in the account and reaches the Mac with its order check (`GET /v1/devices/{id}/commands` returns `shutdown_schedule`). The Mac keeps the last one it heard, so it holds offline; logging out clears it. Setting it takes a login session (`PUT /v1/devices/{id}/shutdown-schedule`), like a shutdown.
+Settings › Your day holds the account's plan. There is one, not one per Mac. It is one of two modes:
+
+- **Daily limit.** One total for the day, counted across all devices.
+- **Time blocks.** One set of blocks for weekdays and one for weekends, at most 8 each; "Change today only" replaces them for one day. Outside the blocks the Macs either cover the screen or do nothing. The cover is the Pause screen with other words ("Outside your plan", when the next block starts). "15 more minutes" needs no password; "Unlock until HH:MM" always asks for the Mac password or Touch ID and lasts until the next block. It does not keep the Mac awake or lock the keyboard, waits while a break, a call, or your own pause is up, and nothing behind it is counted.
+
+Nothing is stored until Save. A save that would shut Macs down or cover their screens within the hour says so and asks first.
+
+The plan is one row (`day_plan`, a few hundred bytes of JSON; a block is `[start, end]` in minutes past local midnight) saved with `PUT /v1/day-plan` from a login session. The limit itself stays in `budget_version`, so past days keep theirs. A Mac's order check sends the version it has (`GET /v1/devices/{id}/commands?plan_at=<ms>`) and gets the plan back only when it changed. The Mac keeps the last one it heard, so it holds offline; logging out clears it. Times are each Mac's own clock.
 
 ```json
-{ "when": "limit", "after": null, "delay_minutes": 30, "command": "last-meeting-end" }
+{ "mode": "planner", "weekdays": [[540, 720], [780, 1080]], "weekends": [], "today": null,
+  "outside": "pause", "shutdown": "last_block", "at": null, "delay_minutes": 0, "command": "last-meeting-end" }
 ```
 
-The shutdown comes due one of two ways:
+## Scheduled shutdown
 
-- `when: "time"`: after `after`, the Mac's own local `HH:MM`.
-- `when: "limit"`: `delay_minutes` (0–720, by the clock) after today's limit is crossed. The crossing counts only if Workholic saw the total under the limit earlier that day, so a Mac started already over does not shut down.
+The plan's end of the day shuts every Mac down, one of three ways:
+
+- `shutdown: "time"`: after `at`, on the Mac's own clock.
+- `shutdown: "limit"` (daily limit mode): `delay_minutes` (0–720, by the clock) after today's limit is crossed. The crossing counts only if Workholic saw the total under the limit earlier that day, so a Mac started already over does not shut down.
+- `shutdown: "last_block"` (time blocks mode): when today's last block ends. A day with no blocks has no shutdown.
+
+Macs from before the plan get it as the old `shutdown_schedule` in the same check, worked out for the day.
 
 `command` (optional) is for days that run late, such as a meeting after the usual time: the Mac also waits for the time the script prints. Whichever is later wins; a script can push the shutdown later, never earlier.
 
@@ -81,17 +94,18 @@ The script runs only once the time and limit parts hold, then again every 5 minu
 
 It is built so that it never shuts down by surprise:
 
-- Anything unclear means no shutdown: a schedule that fails the Mac's own checks, a script that is missing, not executable, fails, times out, or prints anything but a time, or a limit or today's total not known yet. The menu says why.
+- Anything unclear means no shutdown: a plan that fails the Mac's own checks, a script that is missing, not executable, fails, times out, or prints anything but a time, or a limit or today's total not known yet. The menu says why.
 - It fires only when Workholic saw it "not yet due" earlier the same day. Starting the Mac after the time does not shut it down. (A Mac that slept through the time does get the warning when it wakes.)
 - A call (microphone or camera in use) holds it until the call ends.
 - A 60-second window over everything, the break and pause covers included, counts down with Cancel (Return or Esc) and Shut Down Now. A call that starts during the countdown also stops it.
 - Once warned, the day is done. A cancel, or an app that refuses to quit, is not tried again until tomorrow.
+- A changed plan arms again: it fires only once seen "not yet due" under the new rule, so saving a time already past does not shut down today.
 
 The shutdown itself is the same as one from the web: covers lifted, then the "shut down" Apple Event.
 
 ## Settings are one copy, the latest save wins
 
-Break settings and the daily limit live in the account. An edit on a Mac goes up at once. The web Settings page, while it is open, asks every minute whether anything changed (`GET /v1/settings` returns the limit and when breaks last changed). A Mac gets the same fields in its order check (`GET /v1/devices/{id}/commands` returns `settings`), so each check is one request: every minute when nobody is at the Mac, every five minutes while someone is, and at once (at most every 15 seconds) when the menu bar menu or a window opens or the Mac wakes. The full break list is fetched only when that time moves. A break edit goes up at once.
+Break settings, the daily limit, and the day plan live in the account. An edit on a Mac goes up at once. Every page of the web app fetches what it shows once a minute while it is visible (`GET /v1/settings` returns the limit, the plan, and when breaks last changed). A Mac gets the same fields in its order check (`GET /v1/devices/{id}/commands` returns `settings`), so each check is one request: every minute when nobody is at the Mac, every five minutes while someone is, and at once (at most every 15 seconds) when the menu bar menu or a window opens or the Mac wakes. The full break list is fetched only when that time moves. A break edit goes up at once.
 
 If two places edit breaks before either has heard of the other, the later edit wins. A Mac compares the time of its own unsent edit with the account's `updated_at_ms`. The web form keeps unsaved edits and says another device changed breaks; saving then wins because it is later.
 

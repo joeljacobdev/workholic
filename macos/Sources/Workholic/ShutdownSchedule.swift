@@ -2,27 +2,8 @@ import AppKit
 import Foundation
 import WorkholicCore
 
-/// The daily scheduled shutdown is set per device in the account and arrives with the order check.
-/// The last one heard is kept here, so it holds offline and across a restart. Logging out clears it.
+/// The daily scheduled shutdown comes from the account's day plan, kept by `PlanStore`.
 enum ShutdownSchedule {
-    private static let key = "shutdownSchedule"
-
-    /// Nil when there is none, or when the stored one does not pass the Mac's own checks.
-    static func load(defaults: UserDefaults = .standard) -> ShutdownRule? {
-        guard let data = defaults.data(forKey: key),
-              let rule = try? JSONDecoder().decode(ShutdownRule.self, from: data),
-              validShutdownRule(rule) else { return nil }
-        return rule
-    }
-
-    static func save(_ rule: ShutdownRule?, defaults: UserDefaults = .standard) {
-        if let rule, let data = try? JSONEncoder().encode(rule) {
-            defaults.set(data, forKey: key)
-        } else {
-            defaults.removeObject(forKey: key)
-        }
-    }
-
     /// Scripts the schedule may name. They live only on this Mac, with any credentials they need.
     static var commandsFolder: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]

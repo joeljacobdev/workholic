@@ -8,7 +8,9 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp .build/release/Workholic "$APP/Contents/MacOS/Workholic"
 cp Info.plist "$APP/Contents/Info.plist"
 cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
-if [ -n "${VERSION:-}" ]; then
+# The committed version, unless VERSION says otherwise.
+VERSION="${VERSION:-$(cat ../version.txt)}"
+if [ -n "$VERSION" ]; then
   /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $VERSION" -c "Set :CFBundleShortVersionString $VERSION" "$APP/Contents/Info.plist"
 fi
 codesign --force --sign - "$APP"

@@ -1,12 +1,12 @@
-.PHONY: install build
+.PHONY: install build hooks
 
-# make install bumps the version, builds the menu-bar app, and puts it in ~/Applications.
+# The version is bumped by each commit (.githooks/pre-commit), not here: an install builds the
+# version in version.txt, so installing the same commit twice gives the same version.
 
-install:
-	@version=$$(($$(cat version.txt) + 1)); \
-	echo $$version > version.txt; \
+install: hooks
+	@version=$$(cat version.txt); \
 	echo "Building Workholic $$version"; \
-	VERSION=$$version macos/scripts/build-app.sh; \
+	macos/scripts/build-app.sh; \
 	dest="$$HOME/Applications/Workholic.app"; \
 	mkdir -p "$$HOME/Applications"; \
 	if pid=$$(pgrep -x Workholic); then kill $$pid || true; sleep 0.5; fi; \
@@ -17,3 +17,7 @@ install:
 
 build:
 	macos/scripts/build-app.sh
+
+# Turns on the hook that bumps version.txt with every commit.
+hooks:
+	@git config core.hooksPath .githooks
