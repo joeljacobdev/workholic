@@ -5,14 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Workholic</title>
   <meta name="description" content="Your daily attention budget">
-  <meta name="theme-color" content="#F3F3F7" media="(prefers-color-scheme: light)">
-  <meta name="theme-color" content="#0E0D18" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#F5F5F7" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#1E1E1E" media="(prefers-color-scheme: dark)">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="Workholic">
   <link rel="icon" href="/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <link rel="manifest" href="/manifest.webmanifest">
-  <link rel="preload" href="/fonts/instrument-sans.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/app.css">
   <link rel="modulepreload" href="/js/core.js">
   <link rel="modulepreload" href="/js/day.js">
@@ -25,22 +24,22 @@
     <div class="login-card">
       <img src="/icon.svg" alt="" class="login-icon" width="64" height="64">
       <h1>Workholic</h1>
-      <p class="muted">Your daily attention budget</p>
+      <p class="secondary">Your daily attention budget</p>
       <form id="login-form" novalidate>
         <label for="username">Username</label>
         <input id="username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required>
         <label for="password">Password</label>
         <input id="password" name="password" type="password" autocomplete="current-password" required>
         <p id="login-error" class="error" role="alert" hidden></p>
-        <button type="submit" id="login-button" class="primary">Log in</button>
+        <button type="submit" id="login-button" class="btn default wide">Log In</button>
       </form>
     </div>
   </main>
 
   <div id="app-view" hidden>
-    <header class="topbar">
+    <header class="toolbar">
       <a class="brand" href="#today">
-        <img src="/icon.svg" alt="" width="30" height="30">
+        <img src="/icon.svg" alt="" width="22" height="22">
         <span>Workholic</span>
       </a>
       <nav class="tabs" aria-label="Sections">
@@ -53,36 +52,32 @@
     <p id="app-error" class="error banner" role="alert" hidden></p>
 
     <section id="tab-today" class="tab-panel loading" hidden>
-      <div class="hero">
-        <div class="gauge-wrap">
-          <svg class="gauge" viewBox="0 0 120 120" aria-hidden="true">
-            <circle class="gauge-track" cx="60" cy="60" r="50"></circle>
-            <circle id="gauge-arc" class="gauge-arc" cx="60" cy="60" r="50"></circle>
-          </svg>
-          <div class="gauge-center">
+      <div class="group summary">
+        <div class="summary-head">
+          <div>
             <div id="today-used" class="figure">–</div>
-            <div id="today-of" class="muted small"></div>
+            <div id="today-of" class="secondary"></div>
           </div>
+          <dl class="facts">
+            <div><dt id="today-date">Left today</dt><dd id="today-left">–</dd></div>
+            <div><dt id="today-limit-label">Daily limit</dt><dd id="today-limit">–</dd></div>
+            <div><dt>Devices</dt><dd id="today-devices">–</dd></div>
+          </dl>
         </div>
-        <dl class="hero-facts">
-          <div><dt id="today-date">Today</dt><dd id="today-left" class="lead">–</dd></div>
-          <div><dt id="today-limit-label">Daily limit</dt><dd id="today-limit">–</dd></div>
-          <div><dt>Devices today</dt><dd id="today-devices">–</dd></div>
-        </dl>
+        <div class="meter" aria-hidden="true"><span id="gauge-arc"></span></div>
       </div>
       <div id="today-detail"></div>
-      <p class="footnote muted small">Updated <span id="updated-at">–</span> · <button type="button" id="refresh" class="link">Refresh</button></p>
+      <p class="footnote">Updated <span id="updated-at">–</span>. <button type="button" id="refresh" class="link">Refresh</button></p>
     </section>
 
     <section id="tab-history" class="tab-panel" hidden>
-      <div class="panel">
-        <div class="panel-head">
-          <h2>Last 14 days</h2>
-          <p id="history-summary" class="muted small"></p>
-        </div>
-        <div id="history-focus"></div>
-        <ol id="history-list" class="history"></ol>
+      <div class="page-head">
+        <h1>Last 14 days</h1>
+        <p id="history-summary" class="secondary"></p>
       </div>
+      <div id="history-focus"></div>
+      <div id="history-chart" class="group chart-group"></div>
+      <ol id="history-list" class="group list"></ol>
     </section>
 
     <section id="tab-day" class="tab-panel" hidden>
@@ -90,148 +85,185 @@
         <a id="day-prev" class="step" href="#" aria-label="Previous day">‹</a>
         <div>
           <h1 id="day-title">–</h1>
-          <p id="day-sub" class="muted"></p>
+          <p id="day-sub" class="secondary"></p>
         </div>
         <a id="day-next" class="step" href="#" aria-label="Next day">›</a>
       </div>
       <div id="day-detail"></div>
-      <p class="footnote"><a href="#history" class="link">Back to history</a></p>
+      <p class="footnote"><a href="#history" class="link">Back to History</a></p>
     </section>
 
     <section id="tab-settings" class="tab-panel" hidden>
-      <div class="panel" id="plan-panel">
+      <form id="plan-form" class="settings-section" novalidate>
         <h2>Your day</h2>
-        <p class="muted small">One plan for all your Macs. Nothing changes until you press Save; each Mac picks it up within 5 minutes.</p>
-        <form id="plan-form" class="plan" novalidate>
-          <div class="modes" role="radiogroup" aria-label="How to plan the day">
-            <label class="option">
-              <input type="radio" name="plan-mode" value="limit" id="plan-mode-limit">
-              <span><strong>Daily limit</strong><span class="muted">One total for the day, counted across all your devices.</span></span>
-            </label>
-            <label class="option">
-              <input type="radio" name="plan-mode" value="planner" id="plan-mode-planner">
-              <span><strong>Time blocks</strong><span class="muted">Work at set times. Outside them, your Macs can cover the screen.</span></span>
-            </label>
+        <div class="group">
+          <div class="cell">
+            <span class="cell-label">Plan the day by</span>
+            <div class="seg" role="radiogroup" aria-label="Plan the day by">
+              <label><input type="radio" name="plan-mode" value="limit" id="plan-mode-limit"><span>Daily limit</span></label>
+              <label><input type="radio" name="plan-mode" value="planner" id="plan-mode-planner"><span>Time blocks</span></label>
+            </div>
           </div>
-          <div id="plan-limit" class="limit-form">
-            <label>Hours <input id="limit-hours" type="number" min="0" max="24" step="1" inputmode="numeric"></label>
-            <label>Minutes <input id="limit-minutes" type="number" min="0" max="59" step="5" inputmode="numeric"></label>
+          <div id="plan-limit" class="cell">
+            <span class="cell-label">Daily limit<small>Counted across all your devices</small></span>
+            <span class="fields">
+              <input id="limit-hours" class="num-field" type="number" min="0" max="24" step="1" inputmode="numeric" aria-label="Hours"> h
+              <input id="limit-minutes" class="num-field" type="number" min="0" max="59" step="5" inputmode="numeric" aria-label="Minutes"> min
+            </span>
           </div>
-          <div id="plan-planner" class="planner" hidden>
-            <div class="block-group">
-              <h3>Weekdays</h3>
+          <div id="plan-planner" hidden>
+            <div class="cell stacked">
+              <span class="cell-label">Weekdays</span>
               <ol id="blocks-weekdays" class="blocks"></ol>
-              <button type="button" class="link" data-add="weekdays">Add a block</button>
+              <button type="button" class="add" data-add="weekdays">Add block</button>
             </div>
-            <div class="block-group">
-              <h3>Weekends</h3>
+            <div class="cell stacked">
+              <span class="cell-label">Weekends</span>
               <ol id="blocks-weekends" class="blocks"></ol>
-              <button type="button" class="link" data-add="weekends">Add a block</button>
+              <button type="button" class="add" data-add="weekends">Add block</button>
             </div>
-            <div class="block-group">
-              <h3>Today</h3>
-              <p id="today-blocks-note" class="muted small"></p>
+            <div class="cell stacked">
+              <div class="cell-row">
+                <span class="cell-label">Today<small id="today-blocks-note"></small></span>
+                <button type="button" class="btn" id="today-change">Change for Today…</button>
+                <button type="button" class="btn" id="today-reset" hidden>Use Usual Blocks</button>
+              </div>
               <ol id="blocks-today" class="blocks" hidden></ol>
-              <div class="line">
-                <button type="button" class="link" id="today-change">Change today only</button>
-                <button type="button" class="link" data-add="today" id="today-add" hidden>Add a block</button>
-                <button type="button" class="link quiet" id="today-reset" hidden>Back to the usual blocks</button>
-              </div>
+              <button type="button" class="add" data-add="today" id="today-add" hidden>Add block</button>
             </div>
-            <fieldset class="block-group">
-              <legend>Outside the blocks</legend>
-              <label class="check"><input type="radio" name="plan-outside" value="pause"> Cover the screen. “15 more minutes”, or unlock with the Mac’s password.</label>
-              <label class="check"><input type="radio" name="plan-outside" value="none"> Do nothing</label>
-            </fieldset>
+            <div class="cell">
+              <span class="cell-label">Outside the blocks<small>“15 more minutes”, or unlock with the Mac’s password</small></span>
+              <select id="plan-outside" aria-label="Outside the blocks">
+                <option value="pause">Cover the screen</option>
+                <option value="none">Do nothing</option>
+              </select>
+            </div>
           </div>
-          <fieldset class="plan-fields">
-            <legend>End of the day</legend>
-            <label class="field"><span>Shut down</span><select id="plan-shutdown"></select></label>
-            <label class="field" id="plan-at-row"><span>At</span><input id="plan-at" type="time"></label>
-            <label class="field" id="plan-delay-row"><span>Wait</span><input id="plan-delay" type="number" min="0" max="720" step="5" inputmode="numeric"><span>minutes after crossing</span></label>
-            <details id="plan-script-row" class="script">
-              <summary>Let a script on the Mac push it later</summary>
-              <label class="field"><span>Script</span><input id="plan-command" type="text" placeholder="script file name" spellcheck="false" autocapitalize="off"></label>
-              <p class="hint">On each Mac, put an executable script in <code>~/Library/Application Support/tech.joeljacob.workholic/commands/</code>. It prints one time, <code>21:30</code> or <code>2026-10-17T21:30:00-07:00</code>; if that is later, the Mac waits for it.</p>
-            </details>
-          </fieldset>
-          <p id="plan-preview" class="preview" aria-live="polite"></p>
-          <div class="line">
-            <button type="submit" class="primary" id="plan-save" disabled>Save</button>
-            <button type="button" class="link" id="plan-discard" hidden>Discard changes</button>
+        </div>
+
+        <div class="group">
+          <div class="cell">
+            <span class="cell-label">Shut down Macs</span>
+            <select id="plan-shutdown" aria-label="Shut down Macs"></select>
           </div>
-          <p id="plan-status" class="muted small" role="status"></p>
-        </form>
-      </div>
-      <div class="panel">
+          <div class="cell" id="plan-at-row">
+            <span class="cell-label">Time</span>
+            <input id="plan-at" type="time" aria-label="Shutdown time">
+          </div>
+          <div class="cell" id="plan-delay-row">
+            <span class="cell-label">Wait after the limit</span>
+            <span class="fields"><input id="plan-delay" class="num-field" type="number" min="0" max="720" step="5" inputmode="numeric" aria-label="Minutes to wait"> min</span>
+          </div>
+          <div class="cell" id="plan-script-row">
+            <span class="cell-label">Script<small>Optional. Can only make the shutdown later.</small></span>
+            <input id="plan-command" class="text-field" type="text" placeholder="None" spellcheck="false" autocapitalize="off" aria-label="Script file name">
+          </div>
+        </div>
+        <p id="plan-preview" class="note preview" aria-live="polite"></p>
+        <p id="plan-script-hint" class="note">A script is an executable in <code>~/Library/Application Support/tech.joeljacob.workholic/commands/</code> on each Mac. It prints one time, <code>21:30</code> or <code>2026-10-17T21:30:00-07:00</code>; if that is later, the Mac waits for it.</p>
+        <div class="actions">
+          <p id="plan-status" class="status" role="status"></p>
+          <button type="button" class="btn" id="plan-discard" hidden>Discard</button>
+          <button type="submit" class="btn default" id="plan-save" disabled>Save</button>
+        </div>
+      </form>
+
+      <form id="breaks-form" class="settings-section">
         <h2>Breaks</h2>
-        <p class="muted small">A session is the time you spend looking at a screen between breaks. You never start one. It begins when you sit down and ends when you step away. A break is the prompt to step away: the screen goes dark until it is over.</p>
-        <form id="breaks-form">
-          <label class="check"><input type="checkbox" id="breaks-enabled"> Show breaks on my Macs</label>
-          <fieldset id="breaks-detail">
-            <h3>Every few minutes</h3>
-            <label class="check"><input type="checkbox" id="breaks-recurring"> Show these pauses</label>
-            <label class="inline">Remind me every
-              <input id="breaks-every" type="number" min="1" max="240" step="1" inputmode="numeric" required>
-              minutes of looking</label>
-            <ol id="breaks-items" class="break-items"></ol>
-            <button type="button" id="breaks-add" class="link">Add a pause</button>
-
-            <h3>Past the daily limit</h3>
-            <label class="check"><input type="checkbox" id="overtime-enabled"> Keep pausing once today’s limit is reached</label>
-            <label class="inline">Pause after every
-              <input id="overtime-every" type="number" min="1" max="240" step="1" inputmode="numeric">
-              minutes past the limit</label>
-            <div class="break-rule">
-              <input id="overtime-message" class="msg" maxlength="200" placeholder="What this pause is for" aria-label="Overtime pause message">
-              <div class="opts">
-                <label><input id="overtime-minutes" type="number" min="1" max="180" inputmode="numeric" aria-label="Overtime pause minutes">min</label>
-                <label><input id="overtime-rest" type="checkbox">Screen off ends it</label>
-              </div>
+        <div class="group">
+          <label class="cell">
+            <span class="cell-label">Show breaks on my Macs<small>A break covers the screen until it is over</small></span>
+            <input type="checkbox" class="switch" role="switch" id="breaks-enabled">
+          </label>
+        </div>
+        <fieldset id="breaks-detail">
+          <h3>Every few minutes</h3>
+          <div class="group">
+            <label class="cell">
+              <span class="cell-label">Remind me to step away</span>
+              <input type="checkbox" class="switch" role="switch" id="breaks-recurring">
+            </label>
+            <div class="cell">
+              <span class="cell-label">After</span>
+              <span class="fields"><input id="breaks-every" class="num-field" type="number" min="1" max="240" step="1" inputmode="numeric" required aria-label="Minutes of looking"> min of looking</span>
             </div>
-            <p class="muted small">Past the limit, this replaces the every-few-minutes pause, so sessions get shorter. The first pause comes that many minutes after you cross it. Nothing changes before the limit.</p>
+            <ol id="breaks-items" class="break-items"></ol>
+            <div class="cell"><button type="button" id="breaks-add" class="add">Add pause</button></div>
+          </div>
 
-            <h3>At set times</h3>
+          <h3>Past the daily limit</h3>
+          <div class="group">
+            <label class="cell">
+              <span class="cell-label">Keep pausing once today’s limit is reached<small>Replaces the reminder above, so sessions get shorter</small></span>
+              <input type="checkbox" class="switch" role="switch" id="overtime-enabled">
+            </label>
+            <div class="cell">
+              <span class="cell-label">Every</span>
+              <span class="fields"><input id="overtime-every" class="num-field" type="number" min="1" max="240" step="1" inputmode="numeric" aria-label="Minutes past the limit"> min past the limit</span>
+            </div>
+            <div class="cell break-rule">
+              <input id="overtime-message" class="text-field msg" maxlength="200" placeholder="What this pause is for" aria-label="Overtime pause message">
+              <span class="opts">
+                <label><input id="overtime-minutes" class="num-field" type="number" min="1" max="180" inputmode="numeric" aria-label="Overtime pause minutes"> min</label>
+                <label><input id="overtime-rest" type="checkbox"> Screen off ends it</label>
+              </span>
+            </div>
+          </div>
+
+          <h3>At set times</h3>
+          <div class="group">
             <ol id="scheduled-items" class="break-items"></ol>
-            <button type="button" id="scheduled-add" class="link">Add a time</button>
-            <p class="muted small">Covers the screen from that time for its length, once a day, in each Mac’s local time. “5 more minutes” puts it off.</p>
-          </fieldset>
-          <button type="submit" class="primary" id="breaks-save">Save breaks</button>
-        </form>
-        <p id="breaks-status" class="muted small" role="status"></p>
-        <p class="muted small">Breaks run in the Mac app, on each Mac by itself. Time on another device during a break still counts toward today. Changes reach every Mac and browser within a few minutes, or at once when you open the Mac's menu; if two places change breaks, the later save wins. Every automatic break offers “5 more minutes”; you can also start one from the Mac’s menu bar.</p>
-      </div>
-      <div id="mac-panel" class="panel" hidden>
+            <div class="cell"><button type="button" id="scheduled-add" class="add">Add time</button></div>
+          </div>
+          <p class="note">Covers the screen from that time for its length, once a day, in each Mac’s local time. “5 more minutes” puts it off.</p>
+        </fieldset>
+        <div class="actions">
+          <p id="breaks-status" class="status" role="status"></p>
+          <button type="submit" class="btn default" id="breaks-save">Save</button>
+        </div>
+      </form>
+
+      <div id="mac-panel" class="settings-section" hidden>
         <h2>This Mac</h2>
-        <label class="check"><input type="checkbox" id="mac-login"> Open Workholic at login</label>
-        <p id="mac-login-note" class="muted small" hidden>macOS needs your OK: turn Workholic on in System Settings › General › Login Items.</p>
-        <label class="check"><input type="checkbox" id="mac-lock"> Lock the Pause screen with this Mac’s password</label>
-        <p class="muted small">Pause keeps the Mac awake and your programs running behind a dark screen. Locked, getting back in asks for your Mac password or Touch ID, and switching apps or quitting is blocked until then.</p>
-        <p class="muted small">These stay on this Mac. <span id="mac-version"></span></p>
+        <div class="group">
+          <label class="cell">
+            <span class="cell-label">Open Workholic at login<small id="mac-login-note" hidden>Turn Workholic on in System Settings › General › Login Items</small></span>
+            <input type="checkbox" class="switch" role="switch" id="mac-login">
+          </label>
+          <label class="cell">
+            <span class="cell-label">Lock Pause with this Mac’s password<small>Getting back in asks for your password or Touch ID</small></span>
+            <input type="checkbox" class="switch" role="switch" id="mac-lock">
+          </label>
+        </div>
+        <p class="note">These stay on this Mac. <span id="mac-version"></span></p>
       </div>
-      <div class="panel">
-        <div class="panel-head">
+
+      <div class="settings-section">
+        <div class="section-head">
           <h2>Devices</h2>
-          <label class="check pick-all" id="devices-all-label" hidden><input type="checkbox" id="devices-all"> Pick all Macs</label>
+          <label class="pick-all" id="devices-all-label" hidden><input type="checkbox" id="devices-all"> Select all Macs</label>
         </div>
-        <ul id="settings-devices" class="device-list"></ul>
-        <p id="settings-devices-empty" class="muted small" hidden>No devices yet. Log in from the Mac app to add one.</p>
-        <div id="device-bulk" class="bulk" role="group" aria-label="Picked Macs" hidden>
+        <ul id="settings-devices" class="group device-list"></ul>
+        <p id="settings-devices-empty" class="note" hidden>No devices yet. Log in from the Mac app to add one.</p>
+        <div id="device-bulk" class="bulk" role="group" aria-label="Selected Macs" hidden>
           <span id="bulk-count" class="count"></span>
-          <button type="button" id="bulk-shutdown" class="link warn">Shut down now…</button>
-          <button type="button" id="bulk-clear" class="link quiet">Clear</button>
+          <button type="button" id="bulk-clear" class="btn">Deselect</button>
+          <button type="button" id="bulk-shutdown" class="btn destructive">Shut Down…</button>
         </div>
-        <p id="bulk-status" class="muted small" role="status"></p>
-        <p class="muted small">Pick Macs to shut them down together. The daily shutdown is set under Your day, and every Mac follows it on its own clock with a 60-second warning first. If its script is missing or fails, the Mac does not shut down.</p>
+        <p id="bulk-status" class="note" role="status"></p>
+        <p class="note">The daily shutdown is set under Your day. Each Mac follows it on its own clock and warns for 60 seconds first.</p>
       </div>
-      <div class="panel">
+
+      <div class="settings-section">
         <h2>Account</h2>
-        <div class="row"><span>Username</span><strong id="set-username">–</strong></div>
-        <div class="row"><span>Timezone</span><strong id="set-timezone">–</strong></div>
-        <div class="row"><span>Idle after</span><strong id="set-idle">–</strong></div>
-        <p class="muted small">Timezone and password are changed with the operator CLI.</p>
+        <div class="group">
+          <div class="cell"><span class="cell-label">Username</span><span id="set-username" class="value">–</span></div>
+          <div class="cell"><span class="cell-label">Time zone</span><span id="set-timezone" class="value">–</span></div>
+          <div class="cell"><span class="cell-label">Idle after</span><span id="set-idle" class="value">–</span></div>
+        </div>
+        <p class="note">Time zone and password are changed with the operator CLI.</p>
+        <div class="actions"><button type="button" id="logout" class="btn destructive">Log Out of This Browser</button></div>
       </div>
-      <button type="button" id="logout" class="danger">Log out of this browser</button>
     </section>
   </div>
 
@@ -242,8 +274,8 @@
     <div id="dialog-body"></div>
     <p id="dialog-status" class="error" role="alert"></p>
     <div class="dialog-actions">
-      <button type="button" id="dialog-cancel" class="secondary">Cancel</button>
-      <button type="button" id="dialog-ok" class="primary"></button>
+      <button type="button" id="dialog-cancel" class="btn">Cancel</button>
+      <button type="button" id="dialog-ok" class="btn default"></button>
     </div>
   </dialog>
 </body>

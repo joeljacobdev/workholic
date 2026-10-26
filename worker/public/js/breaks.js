@@ -24,14 +24,14 @@ export function breaksEdited() {
 function breakRow(item) {
   const row = el("li");
   row.dataset.id = item.id;
-  const message = el("input", "msg");
+  const message = el("input", "msg text-field");
   message.value = item.message;
   message.placeholder = "What this pause is for";
   message.maxLength = 200;
   message.setAttribute("aria-label", "Pause message");
   const opts = el("div", "opts");
   const minutesLabel = el("label");
-  const minutes = el("input", "minutes");
+  const minutes = el("input", "minutes num-field");
   minutes.type = "number";
   minutes.min = "1";
   minutes.max = "180";
@@ -44,14 +44,15 @@ function breakRow(item) {
   rest.checked = item.rest;
   restLabel.append(rest, document.createTextNode("Screen off ends it"));
   opts.append(minutesLabel, restLabel);
-  const remove = el("button", "link remove", "Remove");
+  const remove = el("button", "minus remove", "−");
   remove.type = "button";
+  remove.setAttribute("aria-label", "Remove pause");
   remove.addEventListener("click", () => {
     row.remove();
     breaksDirty = true;
     syncRemoveButtons();
   });
-  row.append(message, opts, remove);
+  row.append(remove, message, opts);
   return row;
 }
 
@@ -64,7 +65,7 @@ function syncRemoveButtons() {
 function scheduledRow(entry) {
   const row = el("li");
   row.dataset.id = entry.id;
-  const message = el("input", "msg");
+  const message = el("input", "msg text-field");
   message.value = entry.message;
   message.placeholder = "What this pause is for";
   message.maxLength = 200;
@@ -77,7 +78,7 @@ function scheduledRow(entry) {
   at.value = entry.at;
   atLabel.append(document.createTextNode("At"), at);
   const minutesLabel = el("label");
-  const minutes = el("input", "minutes");
+  const minutes = el("input", "minutes num-field");
   minutes.type = "number";
   minutes.min = "1";
   minutes.max = "180";
@@ -85,14 +86,15 @@ function scheduledRow(entry) {
   minutes.value = String(entry.minutes);
   minutesLabel.append(minutes, document.createTextNode("min"));
   when.append(atLabel, minutesLabel);
-  const remove = el("button", "link remove", "Remove");
+  const remove = el("button", "minus remove", "−");
   remove.type = "button";
+  remove.setAttribute("aria-label", "Remove set time");
   remove.addEventListener("click", () => {
     row.remove();
     breaksDirty = true;
     syncScheduledAdd();
   });
-  row.append(message, when, remove);
+  row.append(remove, message, when);
   return row;
 }
 

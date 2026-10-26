@@ -75,7 +75,7 @@ function deviceRow(id) {
     const parts = [];
     if (shutdown?.state === "pending") {
       parts.push(el("span", "", `Shutdown asked at ${clock(shutdown.requested_at_ms)}. It runs when this Mac next checks in.`));
-      const cancel = el("button", "link", "Cancel shutdown");
+      const cancel = el("button", "btn", "Cancel Shutdown");
       cancel.type = "button";
       cancel.addEventListener("click", () => withdraw(cancel));
       parts.push(cancel);
@@ -85,7 +85,7 @@ function deviceRow(id) {
     // The Mac acknowledges before it acts, so this says the order arrived, not that it powered off.
     if (shutdown?.state === "delivered") parts.push(el("span", "", `Shutdown sent to this Mac at ${clock(shutdown.delivered_at_ms)}.`));
     if (shutdown?.state === "failed") parts.push(el("span", "", `Shutdown at ${clock(shutdown.delivered_at_ms)} did not go through (${shutdown.result.slice("failed:".length)}).`));
-    const ask = el("button", "link warn", "Shut down now…");
+    const ask = el("button", "btn destructive", "Shut Down…");
     ask.type = "button";
     ask.addEventListener("click", () => askShutdown());
     parts.push(ask);
@@ -97,7 +97,7 @@ function deviceRow(id) {
     return openDialog({
       title: `Shut down ${entry.display_name}?`,
       body: "It shuts down within a few minutes if it is on, or the next time Workholic runs on it. Unsaved work in open apps can stop the shutdown or be lost.",
-      confirmLabel: "Shut down",
+      confirmLabel: "Shut Down",
       danger: true,
       onConfirm: async () => {
         try {
@@ -123,7 +123,7 @@ function deviceRow(id) {
     } catch (error) {
       status.textContent = failure(error, "cancel the shutdown");
       button.disabled = false;
-      button.textContent = "Cancel shutdown";
+      button.textContent = "Cancel Shutdown";
     }
   }
 
@@ -134,7 +134,7 @@ function deviceRow(id) {
     const able = canShutDown(entry);
     pick.hidden = !able;
     pick.checked = selected.has(id);
-    pick.setAttribute("aria-label", `Pick ${entry.display_name}`);
+    pick.setAttribute("aria-label", `Select ${entry.display_name}`);
     const seen = presence(entry.last_seen_at_ms);
     dot.hidden = entry.revoked;
     dot.classList.toggle("on", seen.on);
@@ -170,7 +170,7 @@ function syncSelection() {
   const able = [...rows.values()].filter((row) => canShutDown(row.entry())).length;
   const count = selected.size;
   $("device-bulk").hidden = count === 0;
-  $("bulk-count").textContent = count === 1 ? "1 Mac picked" : `${count} Macs picked`;
+  $("bulk-count").textContent = count === 1 ? "1 Mac selected" : `${count} Macs selected`;
   $("devices-all-label").hidden = able < 2;
   $("devices-all").checked = able > 0 && count === able;
   $("devices-all").indeterminate = count > 0 && count < able;
@@ -196,7 +196,7 @@ function shutDownMany() {
       nameList(entries),
       "Each shuts down within a few minutes if it is on, or the next time Workholic runs on it. Unsaved work in open apps can stop the shutdown or be lost.",
     ],
-    confirmLabel: count === 1 ? "Shut down" : `Shut down ${count} Macs`,
+    confirmLabel: count === 1 ? "Shut Down" : `Shut Down ${count} Macs`,
     danger: true,
     onConfirm: async () => {
       try {

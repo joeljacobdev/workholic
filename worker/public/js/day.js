@@ -6,7 +6,6 @@ import {
 import { blocksOn, currentPlan, plannedMs } from "./plan.js";
 import { hideTip, setTip, tipLine } from "./tip.js";
 
-const GAUGE_CIRCUMFERENCE = 2 * Math.PI * 50;
 // Credited runs closer than this read as one stretch on the timeline.
 const RUN_GAP_MS = 60_000;
 
@@ -151,7 +150,7 @@ function devicesPanel(detail, device) {
     panel.append(el("p", "muted empty", "No device reported time on this day."));
     return panel;
   }
-  if (shown.length > 1) head.append(el("p", "muted small", "Pick one to see only its time"));
+  if (shown.length > 1) head.append(el("p", "", "Click one to see only its time"));
   const total = Math.max(1, detail.credited_ms);
   panel.append(
     stackBar(
@@ -206,7 +205,7 @@ function timelinePanel(detail, view, device, nowMs) {
   const span = detail.end_ms - detail.start_ms;
   const first = view.segments[0].start_ms;
   const last = view.segments[view.segments.length - 1].end_ms;
-  head.append(el("p", "muted small", `${formatDuration(view.creditedMs)}, first ${clock(first)}, last ${clock(last)}`));
+  head.append(el("p", "", `First ${clock(first)}, last ${clock(last)}`));
 
   const lane = el("div", "lane");
   lane.setAttribute("aria-label", `${view.label}: active stretches through the day`);
@@ -232,9 +231,8 @@ function timelinePanel(detail, view, device, nowMs) {
     now.title = "Now";
     lane.append(now);
   }
-  panel.append(lane, axis(detail, 6));
 
-  // Minutes per hour.
+  // Minutes per hour, stacked by device when showing them all.
   const hours = Math.round(span / HOUR_MS);
   const grid = el("div", "hours");
   grid.setAttribute("role", "img");
@@ -257,10 +255,14 @@ function timelinePanel(detail, view, device, nowMs) {
       perDevice.set(segment.device_id, (perDevice.get(segment.device_id) ?? 0) + overlap);
     }
     const column = el("div", "hour");
-    if (sum > 0) {
+    const parts = view.all
+      ? [...perDevice.entries()].map(([deviceId, ms]) => ({ deviceId, ms })).sort(byEnrollment(device)).map((part) => [device(part.deviceId).color, part.ms])
+      : [[view.color, sum]];
+    for (const [color, ms] of parts) {
+      if (ms <= 0) continue;
       const fill = el("span");
-      fill.style.setProperty("--c", view.color);
-      fill.style.height = `${(sum / HOUR_MS) * 100}%`;
+      fill.style.setProperty("--c", color);
+      fill.style.height = `${(ms / HOUR_MS) * 100}%`;
       column.append(fill);
     }
     if (sum > busiest.ms) busiest = { hour: hourStart, ms: sum };
@@ -271,22 +273,29 @@ function timelinePanel(detail, view, device, nowMs) {
     grid.append(column);
   }
   grid.setAttribute("aria-label", busiest.ms > 0 ? `Minutes per hour. Busiest hour starts ${clock(busiest.hour)} with ${formatDuration(busiest.ms)}.` : "Minutes per hour");
-  const hoursHead = el("div", "panel-head");
-  hoursHead.style.margin = "26px 0 22px";
-  hoursHead.append(el("h3", "", "Minutes per hour"));
-  if (busiest.ms > 0) {
-    hoursHead.append(el("p", "muted small", `Busiest hour ${clock(busiest.hour)} – ${clock(Math.min(busiest.hour + HOUR_MS, detail.end_ms))}, ${formatDuration(busiest.ms)}`));
+  panel.append(grid, lane, axis(detail, 6));
+
+  // Which color is which device, when the columns are split by device.
+  const shown = view.all ? [...new Set(view.segments.map((segment) => segment.device_id))] : [];
+  if (shown.length > 1) {
+    const legend = el("div", "legend");
+    for (const id of shown.sort((a, b) => device(a).order - device(b).order)) {
+      const item = el("span");
+      item.append(swatch(device(id).color), document.createTextNode(device(id).display_name));
+      legend.append(item);
+    }
+    panel.append(legend);
   }
-  const hoursAxis = axis(detail, 6);
-  hoursAxis.classList.add("hours-axis");
-  panel.append(hoursHead, grid, hoursAxis);
+  if (busiest.ms > 0) {
+    head.querySelector("p").textContent += `. Busiest ${clock(busiest.hour)}, ${formatDuration(busiest.ms)}`;
+  }
   return panel;
 }
 
 function appsPanel(detail, view, device) {
   const panel = el("div", "panel");
   const head = el("div", "panel-head");
-  head.append(el("h2", "", "Apps"));
+  head.append(el("h2", "", "Most used"));
   panel.append(head);
   const apps = view.apps.slice(0, 10);
   if (apps.length === 0) {
@@ -294,7 +303,7 @@ function appsPanel(detail, view, device) {
     panel.append(el("p", "muted empty", message));
     return panel;
   }
-  if (view.apps.length > apps.length) head.append(el("p", "muted small", `Top ${apps.length} of ${view.apps.length}`));
+  if (view.apps.length > apps.length) head.append(el("p", "", `Top ${apps.length} of ${view.apps.length}`));
   const byApp = new Map();
   for (const entry of detail.devices) {
     for (const app of entry.apps ?? []) {
@@ -307,10 +316,8 @@ function appsPanel(detail, view, device) {
   const list = el("ol", "apps");
   for (const app of apps) {
     const item = el("li");
-    const label = el("div", "label");
     const name = el("span", "name", appName(app.appKey));
     name.title = app.appKey;
-    label.append(name, el("span", "value", formatDuration(app.creditedMs)));
     const split = byApp.get(app.appKey) ?? new Map();
     const bar = stackBar(
       [
@@ -323,7 +330,9 @@ function appsPanel(detail, view, device) {
       app.creditedMs,
     );
     bar.style.width = `${Math.max(2, (app.creditedMs / top) * 100)}%`;
-    item.append(label, bar);
+    const track = el("div");
+    track.append(bar);
+    item.append(name, track, el("span", "value", formatDuration(app.creditedMs)));
     list.append(item);
   }
   panel.append(list);
@@ -353,9 +362,9 @@ function renderDay(container, detail, { force = false } = {}) {
   const present = detail.devices.filter((entry) => entry.rawMs > 0).sort(byEnrollment(device)).map((entry) => entry.deviceId);
   if (picked.focus !== null && !present.includes(picked.focus)) present.push(picked.focus);
   const shown = dayView(detail, device);
-  const nodes = [devicesPanel(detail, device)];
+  const nodes = [];
   if (present.length > 1 || picked.focus !== null) nodes.push(focusBar(present, device));
-  nodes.push(timelinePanel(detail, shown, device, Date.now()), appsPanel(detail, shown, device));
+  nodes.push(timelinePanel(detail, shown, device, Date.now()), appsPanel(detail, shown, device), devicesPanel(detail, device));
   container.replaceChildren(...nodes);
 }
 
@@ -372,14 +381,13 @@ export async function loadToday() {
   const over = limit !== null && used > limit;
 
   $("today-used").textContent = formatDuration(used);
-  $("today-of").textContent = limit === null ? "no daily limit" : planner ? `of ${formatDuration(limit)} planned` : `of ${formatDuration(limit)}`;
+  $("today-of").textContent = limit === null ? "Today, no daily limit" : planner ? `Today, of ${formatDuration(limit)} planned` : `Today, of ${formatDuration(limit)}`;
   const fraction = limit ? Math.min(used / limit, 1) : 0;
-  const arc = $("gauge-arc");
-  arc.style.strokeDasharray = String(GAUGE_CIRCUMFERENCE);
-  arc.style.strokeDashoffset = String(GAUGE_CIRCUMFERENCE * (1 - fraction));
-  arc.classList.toggle("over", over);
+  const meter = $("gauge-arc");
+  meter.style.width = `${fraction * 100}%`;
+  meter.classList.toggle("over", over);
 
-  $("today-date").textContent = over ? (planner ? "Past today's plan" : "Over today's limit") : (planner ? "Left in today's plan" : "Left today");
+  $("today-date").textContent = over ? (planner ? "Past the plan" : "Over the limit") : "Left today";
   $("today-left").textContent = limit === null ? "No limit" : over ? formatDuration(used - limit) : formatDuration(limit - used);
   $("today-left").style.color = over ? "var(--over)" : "";
   $("today-limit-label").textContent = planner ? "Planned today" : "Daily limit";

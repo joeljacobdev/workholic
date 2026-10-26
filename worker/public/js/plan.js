@@ -13,8 +13,8 @@ const SOON_MINUTES = 60;
 const CHECK_IN = "within 5 minutes";
 const LISTS = ["weekdays", "weekends", "today"];
 const SHUTDOWNS = {
-  limit: [["off", "Never"], ["time", "At a set time"], ["limit", "After the daily limit"]],
-  planner: [["off", "Never"], ["last_block", "When the last block ends"], ["time", "At a set time"]],
+  limit: [["off", "Off"], ["time", "At a set time"], ["limit", "After the daily limit"]],
+  planner: [["off", "Off"], ["last_block", "When the last block ends"], ["time", "At a set time"]],
 };
 
 const ERRORS = {
@@ -100,13 +100,14 @@ function blockRow([start, end]) {
   to.type = "time";
   to.value = hhmm(end % DAY_MINUTES);
   to.setAttribute("aria-label", "Ends");
-  const remove = el("button", "link quiet", "Remove");
+  const remove = el("button", "minus", "−");
   remove.type = "button";
+  remove.setAttribute("aria-label", "Remove block");
   remove.addEventListener("click", () => {
     item.remove();
     showParts();
   });
-  item.append(from, el("span", "muted", "to"), to, remove);
+  item.append(remove, from, el("span", "", "to"), to);
   return item;
 }
 
@@ -190,7 +191,7 @@ function read() {
   const plan = {
     mode, weekdays: lists.weekdays, weekends: lists.weekends,
     today: todayOwn ? { day: key, blocks: lists.today } : null,
-    outside: checked("plan-outside") ?? "pause", shutdown, at, delay_minutes: delay, command,
+    outside: $("plan-outside").value, shutdown, at, delay_minutes: delay, command,
   };
   return { ok: true, plan, limitMs };
 }
@@ -216,16 +217,15 @@ function fill() {
   setBlocks("weekends", plan.weekends);
   todayOwn = plan.today !== null;
   setBlocks("today", plan.today?.blocks ?? []);
-  for (const radio of document.querySelectorAll('input[name="plan-outside"]')) radio.checked = radio.value === plan.outside;
+  $("plan-outside").value = plan.outside;
   setShutdownOptions(plan.mode);
   $("plan-shutdown").value = plan.shutdown;
   $("plan-at").value = hhmm(plan.at ?? 22 * 60);
   $("plan-delay").value = String(plan.delay_minutes);
   $("plan-command").value = plan.command ?? "";
-  $("plan-script-row").open = plan.command !== null;
 }
 
-/** The shutdown choices that belong to a mode. One that does not carry over becomes "Never". */
+/** The shutdown choices that belong to a mode. One that does not carry over becomes "Off". */
 function setShutdownOptions(mode) {
   const select = $("plan-shutdown");
   if (select.dataset.mode === mode) return;
@@ -276,12 +276,12 @@ function showParts() {
   const shutdown = $("plan-shutdown").value;
   $("plan-at-row").hidden = shutdown !== "time";
   $("plan-delay-row").hidden = shutdown !== "limit";
-  $("plan-script-row").hidden = shutdown === "off";
+  $("plan-script-row").hidden = $("plan-script-hint").hidden = shutdown === "off";
   $("blocks-today").hidden = $("today-add").hidden = $("today-reset").hidden = !todayOwn;
   $("today-change").hidden = todayOwn;
   $("today-blocks-note").textContent = todayOwn
-    ? "Only today. Tomorrow goes back to the usual blocks."
-    : `Today is ${isWeekend(key) ? "a weekend day" : "a weekday"}, so it uses those blocks.`;
+    ? "Its own blocks, for today only"
+    : `Uses the ${isWeekend(key) ? "weekend" : "weekday"} blocks`;
   for (const name of LISTS) {
     const add = document.querySelector(`[data-add="${name}"]`);
     if (add) add.disabled = $(`blocks-${name}`).children.length >= MAX_BLOCKS;

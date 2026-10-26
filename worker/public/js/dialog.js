@@ -17,7 +17,7 @@ export function openDialog({ title, body, confirmLabel, danger = false, onConfir
   $("dialog-body").replaceChildren(...[body].flat().map((part) => (typeof part === "string" ? el("p", "", part) : part)));
   status.textContent = "";
   ok.textContent = confirmLabel;
-  ok.className = danger ? "danger-fill" : "primary";
+  ok.className = danger ? "btn destructive-fill" : "btn default";
   ok.disabled = false;
 
   return new Promise((resolve) => {

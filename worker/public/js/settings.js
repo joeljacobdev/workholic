@@ -24,7 +24,7 @@ function renderMac(state) {
 export function initSettings() {
   if (!macBridge) return;
   window.workholicMac = { update: renderMac };
-  $("logout").textContent = "Log out of this Mac";
+  $("logout").textContent = "Log Out of This Mac";
   $("mac-login").addEventListener("change", (event) => tellMac("openAtLogin", event.target.checked));
   $("mac-lock").addEventListener("change", (event) => tellMac("pauseLocks", event.target.checked));
   renderMac(window.workholicMacState);
