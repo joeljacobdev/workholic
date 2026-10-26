@@ -18,7 +18,8 @@ function renderMac(state) {
   $("mac-login").checked = Boolean(state.openAtLogin);
   $("mac-login-note").hidden = !state.openAtLoginNeedsApproval;
   $("mac-lock").checked = Boolean(state.pauseLocks);
-  $("mac-version").textContent = state.version ? `Workholic for Mac, version ${state.version}.` : "";
+  $("mac-version").textContent = state.version ?? "";
+  $("mac-version-row").hidden = !state.version;
 }
 
 export function initSettings() {

@@ -239,32 +239,13 @@ function setShutdownOptions(mode) {
   select.value = SHUTDOWNS[mode].some(([value]) => value === before) ? before : "off";
 }
 
-/** What the plan does, in a few lines. */
-function describe(plan, limitMs, key) {
-  const lines = [];
-  if (plan.mode === "limit") {
-    lines.push(`Up to ${formatDuration(limitMs)} a day, counted across all your devices.`);
-  } else {
-    const blocks = blocksOn(plan, key);
-    const which = plan.today ? "today only" : isWeekend(key) ? "a weekend day" : "a weekday";
-    lines.push(blocks.length
-      ? `Today (${which}): ${blocks.map(blockText).join(", ")}, ${formatDuration(plannedMs(blocks))} in all.`
-      : `Today (${which}) has no blocks.`);
-    if (plan.outside === "pause") {
-      lines.push(blocks.length ? "Outside them, your Macs cover the screen." : "With no blocks, your Macs stay covered all day.");
-    } else {
-      lines.push("Outside them, nothing happens.");
-    }
-  }
-  const later = plan.command ? ` ${plan.command} can only make it later.` : "";
-  if (plan.shutdown === "time") lines.push(`Shuts down every day at ${hhmm(plan.at)}.${later}`);
-  else if (plan.shutdown === "limit") {
-    lines.push((plan.delay_minutes > 0 ? `Shuts down ${formatDuration(plan.delay_minutes * 60_000)} after the daily limit.` : "Shuts down once past the daily limit.") + later);
-  } else if (plan.shutdown === "last_block") {
-    const at = shutdownMinute(plan, key);
-    lines.push(at === null ? "No blocks today, so no shutdown today." : `Shuts down when the last block ends: today at ${hhmm(at)}.${later}`);
-  }
-  return lines.join(" ");
+/** The last-block choice says when that is today, so the shutdown time is plain without a note. */
+function labelLastBlock(plan, key) {
+  const option = [...$("plan-shutdown").options].find((entry) => entry.value === "last_block");
+  if (!option) return;
+  const at = plan ? shutdownMinute({ ...plan, shutdown: "last_block" }, key) : null;
+  option.textContent = plan && at === null ? "When the last block ends (none today)"
+    : at === null ? "When the last block ends" : `When the last block ends (${hhmm(at)} today)`;
 }
 
 function showParts() {
@@ -276,19 +257,18 @@ function showParts() {
   const shutdown = $("plan-shutdown").value;
   $("plan-at-row").hidden = shutdown !== "time";
   $("plan-delay-row").hidden = shutdown !== "limit";
-  $("plan-script-row").hidden = $("plan-script-hint").hidden = shutdown === "off";
+  $("plan-script-row").hidden = shutdown === "off";
   $("blocks-today").hidden = $("today-add").hidden = $("today-reset").hidden = !todayOwn;
   $("today-change").hidden = todayOwn;
-  $("today-blocks-note").textContent = todayOwn
-    ? "Its own blocks, for today only"
-    : `Uses the ${isWeekend(key) ? "weekend" : "weekday"} blocks`;
   for (const name of LISTS) {
     const add = document.querySelector(`[data-add="${name}"]`);
     if (add) add.disabled = $(`blocks-${name}`).children.length >= MAX_BLOCKS;
   }
   const result = read();
-  $("plan-preview").textContent = result.ok ? describe(result.plan, result.limitMs, key) : result.message;
-  $("plan-preview").classList.toggle("bad", !result.ok);
+  if (mode === "planner") labelLastBlock(result.ok ? result.plan : null, key);
+  // Only a problem with what is entered is spelled out; the form itself says what the plan does.
+  $("plan-problem").textContent = result.ok ? "" : result.message;
+  $("plan-problem").hidden = result.ok;
   const changed = saved !== null && edited();
   $("plan-save").disabled = busy || !changed;
   $("plan-discard").hidden = !changed;
@@ -341,7 +321,7 @@ async function save(event) {
     app.settings.limit_ms = answer.limit_ms;
     saved = { plan: normalize(answer.day_plan, key), limitMs: answer.limit_ms };
     fill();
-    status.textContent = `Saved. Each Mac picks it up ${CHECK_IN}.`;
+    status.textContent = "Saved";
     tellMac("saved");
   } catch (error) {
     if (error instanceof AuthError) return handleFailure(error);

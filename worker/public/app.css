@@ -218,7 +218,9 @@ input[type="checkbox"]:not(.switch), input[type="radio"] { accent-color: var(--b
 }
 .cell + .cell, #plan-planner > .cell + .cell, .break-items:not(:empty) + .cell, .cell + .break-items li:first-child, .break-items li + li { border-top: .5px solid var(--line); }
 #plan-planner > .cell:first-child { border-top: .5px solid var(--line); }
-.cell-label { display: grid; gap: 1px; flex: 1 1 180px; min-width: 0; }
+.cell-label { display: flex; flex-wrap: wrap; align-items: center; gap: 1px 5px; flex: 1 1 180px; min-width: 0; }
+.cell-label small { flex-basis: 100%; }
+.cell-label small.attention { color: var(--gauge); }
 /* A control that wraps under its label still sits on the right. */
 .cell:not(.stacked) > :last-child:not(.cell-label, .add) { margin-left: auto; }
 @media (max-width: 600px) { .cell-label { flex-basis: 120px; } }
@@ -234,9 +236,24 @@ label.cell { cursor: default; }
 .section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .note { font-size: 11px; color: var(--muted); margin: -2px 12px 10px; }
 @media (max-width: 600px) { .note { font-size: 13px; } }
-.note.preview { font-size: 12px; color: var(--ink-2); }
-.note.preview.bad { color: var(--over); }
-@media (max-width: 600px) { .note.preview { font-size: 14px; } }
+.problem { font-size: 12px; color: var(--over); margin: -2px 12px 10px; }
+@media (max-width: 600px) { .problem { font-size: 14px; } }
+
+/* An ⓘ beside a label; the detail opens in a small popover instead of sitting under every row. */
+.info {
+  inline-size: 15px; block-size: 15px; padding: 0; border: 0; border-radius: 50%; flex: none;
+  background: var(--fill); color: var(--muted); cursor: pointer; position: relative;
+}
+.info::before { content: "i"; font: italic 600 10px/15px Georgia, "Times New Roman", serif; }
+.info:hover, .info:focus-visible { color: var(--ink); }
+@media (max-width: 600px) { .info { inline-size: 18px; block-size: 18px; } .info::before { line-height: 18px; font-size: 12px; } }
+.info-pop {
+  position: fixed; inset: auto; margin: 0; max-width: min(280px, calc(100vw - 32px)); border: 0;
+  background: var(--raised); color: var(--ink); border-radius: 8px; padding: 8px 10px;
+  font-size: 12px; line-height: 1.45; box-shadow: 0 0 0 .5px var(--control-line), 0 8px 24px rgb(0 0 0 / .22);
+}
+.info-pop code { font-size: 11px; overflow-wrap: anywhere; }
+@media (max-width: 600px) { .info-pop { font-size: 14px; } }
 .actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 10px; }
 .status { margin-right: auto; color: var(--muted); }
 .status:empty { display: none; }

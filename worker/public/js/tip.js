@@ -38,6 +38,22 @@ function placeTip(event) {
   tip.style.top = `${y}px`;
 }
 
+/** An ⓘ popover opens just under its button, kept on screen. */
+function placeInfo(event) {
+  const pop = event.target;
+  if (event.newState !== "open" || !pop.classList?.contains("info-pop")) return;
+  const button = document.querySelector(`[popovertarget="${pop.id}"]`);
+  if (!button) return;
+  const anchor = button.getBoundingClientRect();
+  const { width, height } = pop.getBoundingClientRect();
+  const x = Math.min(Math.max(8, anchor.left - 12), window.innerWidth - width - 8);
+  const below = anchor.bottom + 6;
+  pop.style.left = `${x}px`;
+  pop.style.top = `${below + height > window.innerHeight - 8 ? anchor.top - height - 6 : below}px`;
+}
+
+// "toggle" does not bubble, so it is caught on the way down.
+document.addEventListener("toggle", placeInfo, true);
 document.addEventListener("pointermove", placeTip);
 document.addEventListener("pointerdown", placeTip);
 document.addEventListener("scroll", hideTip, { passive: true });

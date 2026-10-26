@@ -299,7 +299,7 @@ function appsPanel(detail, view, device) {
   panel.append(head);
   const apps = view.apps.slice(0, 10);
   if (apps.length === 0) {
-    const message = view.all ? "No app time on this day. Time appears after a Mac uploads, about every 5 minutes." : `${view.label} has no app time on this day.`;
+    const message = view.all ? "No app time on this day." : `${view.label} has no app time on this day.`;
     panel.append(el("p", "muted empty", message));
     return panel;
   }
