@@ -35,7 +35,7 @@ Whether a cover is really showing is asked of the window server (is each cover w
 
 Input is noticed two ways: event monitors, which are instant, and a check once a second of when the keyboard or mouse was last touched (`CGEventSource.secondsSinceLastEventType`, no permission needed). The monitors alone missed mouse moves: an active app gets none unless its key window asks for them, and the Pause screen's windows did not ask, so moving the mouse could not brighten a dimmed Pause screen.
 
-Unpausing a locked pause asks for the Mac password. Clicking Unpause again while a prompt is open closes that prompt and opens a new one, since a prompt still open but not seen is likely on another display. Putting the cover back while the prompt is up no longer takes the focus from the prompt.
+Unpausing a locked pause asks for the Mac password in a field on the cover itself, on every display, and checks it on the Mac through OpenDirectory (the account database behind the login window). The system prompt was dropped on purpose: it is another process's window, and that process is the active app while it is up, so the kiosk block stopped holding. The Dock came back, Cmd-Tab worked, and switching to an app on another desktop slid that desktop into view for a moment before the prompt reappeared over it. With the field in the cover, Workholic stays the active app from the click to the unlock and nothing else can come forward. The cost is Touch ID: the cover takes the password only. Esc cancels. A wrong password says so and asks again. A cover put back while asking keeps asking, with the field in the new windows.
 
 While a break is up, app switching, the Dock, and Hide are blocked; Esc still skips. The cover puts itself back if a display is plugged in or out, the Space changes, or anything takes it down. Windows set to join every Space can still stay behind on the desktop they opened on, so on every desktop switch (and, as a fallback, on the next mouse move or countdown second) a cover that is not on the desktop now showing is rebuilt there. This holds for the Pause screen too. With the dashboard window open, Workholic is a Dock app, and a Dock app's windows cannot cover another app's full-screen Space. So while a break or pause cover is up, Workholic steps back to a menu bar app, and the Dock icon returns after.
 
@@ -43,7 +43,7 @@ While a break is up, app switching, the Dock, and Hide are blocked; Esc still sk
 
 Pause is for stepping away while something keeps working, such as an agent. The Mac stays awake, programs keep running, nothing is counted, and the screen is black with the backlight down.
 
-"Lock the Pause screen with this Mac's password" (This Mac, in Settings) makes Unpause and "Unpause for 5 minutes" ask for the Mac password or Touch ID first. While the locked cover is up, app switching, Force Quit, Hide, Quit, and logging out are blocked.
+"Lock the Pause screen with this Mac's password" (This Mac, in Settings) makes Unpause and "Unpause for 5 minutes" ask for the Mac password first. While the locked cover is up, app switching, Force Quit, Hide, Quit, and logging out are blocked.
 
 It is not the macOS lock screen. That screen cannot show Workholic's cover, and it brings the display's own sleep timers with it. The price is that this lock only guards the keyboard. Someone who can end the app another way, such as over SSH, gets past it. Holding the power button still restarts the Mac if anything ever goes wrong.
 
@@ -62,7 +62,7 @@ Settings › Devices has "Shut down now…" beside each Mac, and a box to pick s
 Settings › Your day holds the account's plan. There is one, not one per Mac. It is one of two modes:
 
 - **Daily limit.** One total for the day, counted across all devices.
-- **Time blocks.** One set of blocks for weekdays and one for weekends, at most 8 each; "Change today only" replaces them for one day. Outside the blocks the Macs either cover the screen or do nothing. The cover is the Pause screen with other words ("Outside your plan", when the next block starts). "15 more minutes" needs no password; "Unlock until HH:MM" always asks for the Mac password or Touch ID and lasts until the next block. It does not keep the Mac awake or lock the keyboard, waits while a break, a call, or your own pause is up, and nothing behind it is counted.
+- **Time blocks.** One set of blocks for weekdays and one for weekends, at most 8 each; "Change today only" replaces them for one day. Outside the blocks the Macs either cover the screen or do nothing. The cover is the Pause screen with other words ("Outside your plan", when the next block starts). "15 more minutes" needs no password; "Unlock until HH:MM" always asks for the Mac password and lasts until the next block. It does not keep the Mac awake or lock the keyboard, waits while a break, a call, or your own pause is up, and nothing behind it is counted.
 
 Nothing is stored until Save. A save that would shut Macs down or cover their screens within the hour says so and asks first.
 

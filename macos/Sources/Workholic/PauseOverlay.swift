@@ -7,7 +7,8 @@ import QuartzCore
 /// The backlight goes down with it, and comes up for a few seconds when the mouse moves or a key is pressed.
 ///
 /// Locked, it also blocks app switching, Force Quit, and logging out while it is up, and the
-/// buttons ask for the Mac's password first. Programs keep running and the Mac stays awake.
+/// buttons ask for the Mac's password first, in a field on the cover itself: a system prompt would
+/// make another process the active app and lift the block. Programs keep running and the Mac stays awake.
 /// It is a lock against someone at the keyboard, not against someone who can kill the app.
 ///
 /// The same cover goes up outside the day plan's blocks, with its own words.
@@ -37,6 +38,9 @@ final class PauseOverlay: NSObject {
 
     var onUnpause: (() -> Void)?
     var onPeek: (() -> Void)?
+    /// The password typed into the cover's field. The answer comes back as `endPasswordPrompt` or `passwordWrong`.
+    var onPassword: ((String) -> Void)?
+    var onCancelPassword: (() -> Void)?
     var backlight: Backlight?
     private var windows: [NSWindow] = []
     private var face = Face.pause(locked: false)
@@ -46,6 +50,13 @@ final class PauseOverlay: NSObject {
     private var elapsedLabels: [NSTextField] = []
     private var notes: [NSTextField] = []
     private var dots: [CALayer] = []
+    /// The password prompt, one per window: shown in place of the buttons while asking.
+    private var promptBoxes: [NSView] = []
+    private var captions: [NSTextField] = []
+    private var passwordFields: [NSSecureTextField] = []
+    private var promptCaption = ""
+    /// Which window's button asked, so that screen's field gets the typing.
+    private var promptScreen = 0
     private var minuteTimer: Timer?
     private var since = Date()
     private var locked = false
@@ -61,11 +72,8 @@ final class PauseOverlay: NSObject {
     /// Every two seconds while up, puts back a cover that is missing from some display.
     private var guardTimer: Timer?
     private var rebuiltAt = Date.distantPast
-    /// Set while the cover is put back under the password prompt, which keeps the focus.
-    private var keepFocus = false
 
     private static let wakeFor: TimeInterval = 8
-    private static let underPrompt = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue - 1)
 
     private static let kiosk: NSApplication.PresentationOptions = [
         .hideDock, .hideMenuBar, .disableAppleMenu, .disableProcessSwitching,
@@ -73,6 +81,7 @@ final class PauseOverlay: NSObject {
     ]
 
     var isVisible: Bool { windows.contains { $0.isVisible } }
+    var isAskingPassword: Bool { up && prompting }
 
     /// A display that comes or goes, or a Space change, would otherwise leave part of the screen uncovered.
     override init() {
@@ -92,9 +101,10 @@ final class PauseOverlay: NSObject {
         self.locked = locked
         self.face = face ?? .pause(locked: locked)
         // A pause going up anew starts dark, even if the last one was woken a moment ago.
-        if !up { lastInput = .distantPast }
-        up = true
-        prompting = false
+        if !up {
+            lastInput = .distantPast
+            prompting = false
+        }
         if NSApp.isHidden { NSApp.unhide(nil) }
         layout()
         for window in windows {
@@ -121,11 +131,10 @@ final class PauseOverlay: NSObject {
         for dot in dots {
             breathe(dot)
         }
-        // Taking the focus while the password prompt is up would send the typed password nowhere.
-        if !keepFocus {
-            NSApp.activate(ignoringOtherApps: true)
-            windows.first?.makeKey()
-        }
+        NSApp.activate(ignoringOtherApps: true)
+        windows.first?.makeKey()
+        // A cover put back while asking keeps asking, with the field in the new windows.
+        showPrompt(prompting)
         minuteTimer?.invalidate()
         let timer = Timer(timeInterval: 60, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshElapsed() }
@@ -192,6 +201,7 @@ final class PauseOverlay: NSObject {
         }
         up = false
         prompting = false
+        showPrompt(false)
         input.stop()
         dimTimer?.invalidate()
         dimTimer = nil
@@ -199,16 +209,68 @@ final class PauseOverlay: NSObject {
         if locked { NSApp.presentationOptions = [] }
     }
 
-    /// While the password prompt is up, the cover steps just below it and the screen brightens to read it.
-    /// The prompt is another process's window at the screen saver level, and that process is the
-    /// active app while it is up, so the kiosk options do not hold: at normal level the cover would
-    /// sit under the Dock and any app clicked there. One level below the prompt, only the prompt shows.
-    func makeRoomForPrompt(_ prompting: Bool) {
-        self.prompting = prompting
-        for window in windows {
-            window.level = prompting ? Self.underPrompt : .screenSaver
+    /// Asks for the password in the cover, under `caption`, with the screen bright enough to read it.
+    /// The cover stays where it is and Workholic stays the active app, so nothing else can come forward.
+    func askPassword(caption: String) {
+        promptCaption = caption
+        prompting = true
+        showPrompt(true)
+        backlight?.restore()
+    }
+
+    /// A wrong try: say so, clear the field, and ask again.
+    func passwordWrong() {
+        guard prompting else { return }
+        for field in passwordFields {
+            field.stringValue = ""
         }
-        if prompting { backlight?.restore() } else { dimIfCovered() }
+        for caption in captions {
+            caption.stringValue = "Wrong password. Try again."
+        }
+        focusPasswordField()
+    }
+
+    func endPasswordPrompt() {
+        guard prompting else { return }
+        prompting = false
+        showPrompt(false)
+        dimIfCovered()
+    }
+
+    private func showPrompt(_ on: Bool) {
+        for (index, box) in promptBoxes.enumerated() {
+            box.isHidden = !on
+            peekButtons[index].isHidden = on
+            unpauseButtons[index].isHidden = on
+        }
+        for caption in captions {
+            caption.stringValue = promptCaption
+        }
+        if on {
+            focusPasswordField()
+        } else {
+            for field in passwordFields {
+                field.stringValue = ""
+            }
+        }
+    }
+
+    private func focusPasswordField() {
+        guard !passwordFields.isEmpty else { return }
+        let index = min(promptScreen, passwordFields.count - 1)
+        let window = windows[index]
+        window.makeKey()
+        window.makeFirstResponder(passwordFields[index])
+    }
+
+    @objc private func submitPassword(_ sender: NSControl) {
+        guard prompting, let window = sender.window, let index = windows.firstIndex(of: window) else { return }
+        onPassword?(passwordFields[index].stringValue)
+    }
+
+    @objc private func cancelPassword() {
+        guard prompting else { return }
+        onCancelPassword?()
     }
 
     /// Brightens at once; one timer, pushed back by later input, dims again after a quiet spell.
@@ -254,22 +316,19 @@ final class PauseOverlay: NSObject {
         checkSoon()
     }
 
-    /// Shows the cover again, keeping the password prompt on top if it is up.
-    /// `rebuilding` makes new windows, which open on the desktop now showing.
+    /// Shows the cover again. `rebuilding` makes new windows, which open on the desktop now showing.
     private func reshow(rebuilding: Bool = false) {
-        let wasPrompting = prompting
         rebuildNext = rebuilding
-        keepFocus = wasPrompting
         show(since: since, locked: locked, face: face)
-        keepFocus = false
-        if wasPrompting { makeRoomForPrompt(true) }
     }
 
-    @objc private func unpause() {
+    @objc private func unpause(_ sender: NSControl) {
+        promptScreen = sender.window.flatMap { windows.firstIndex(of: $0) } ?? 0
         onUnpause?()
     }
 
-    @objc private func peek() {
+    @objc private func peek(_ sender: NSControl) {
+        promptScreen = sender.window.flatMap { windows.firstIndex(of: $0) } ?? 0
         onPeek?()
     }
 
@@ -308,6 +367,9 @@ final class PauseOverlay: NSObject {
         peekButtons = []
         unpauseButtons = []
         dots = []
+        promptBoxes = []
+        captions = []
+        passwordFields = []
         for screen in screens {
             let window = OverlayWindow(
                 contentRect: screen.frame,
@@ -327,6 +389,8 @@ final class PauseOverlay: NSObject {
             // Without this an active Workholic gets no mouse moves at all, and moving the mouse could not brighten the screen.
             window.ignoresMouseEvents = false
             window.acceptsMouseMovedEvents = true
+            // The password field and its button are system controls, drawn for a black window.
+            window.appearance = NSAppearance(named: .darkAqua)
 
             let size = screen.frame.size
             let content = NSView(frame: NSRect(origin: .zero, size: size))
@@ -349,12 +413,13 @@ final class PauseOverlay: NSObject {
             elapsed.font = NSFont.monospacedDigitSystemFont(ofSize: 14, weight: .regular)
             elapsed.frame = NSRect(x: 0, y: size.height / 2 - 40, width: size.width, height: 20)
 
-            let peek = button(face.peek, action: #selector(peek), outlined: true)
+            let peek = button(face.peek, action: #selector(peek(_:)), outlined: true)
             peek.frame = NSRect(x: size.width / 2 - 120, y: 104, width: 240, height: 36)
-            let unpause = button(face.unpause, action: #selector(unpause), outlined: false)
+            let unpause = button(face.unpause, action: #selector(unpause(_:)), outlined: false)
             unpause.frame = NSRect(x: size.width / 2 - 120, y: 60, width: 240, height: 32)
+            let (box, caption, field) = promptBox(width: size.width)
 
-            for view in [title, note, elapsed, peek, unpause] {
+            for view in [title, note, elapsed, peek, unpause, box] {
                 content.addSubview(view)
             }
             window.contentView = content
@@ -364,7 +429,33 @@ final class PauseOverlay: NSObject {
             peekButtons.append(peek)
             unpauseButtons.append(unpause)
             dots.append(dot)
+            promptBoxes.append(box)
+            captions.append(caption)
+            passwordFields.append(field)
         }
+    }
+
+    /// The caption, the password field, Unlock, and Cancel, where the buttons sit otherwise. Hidden until asked.
+    private func promptBox(width: CGFloat) -> (NSView, NSTextField, NSSecureTextField) {
+        let box = NSView(frame: NSRect(x: width / 2 - 140, y: 40, width: 280, height: 150))
+        box.isHidden = true
+        let caption = label("", size: 13, white: 0.55, weight: .regular)
+        caption.frame = NSRect(x: 0, y: 124, width: 280, height: 20)
+        let field = NSSecureTextField(frame: NSRect(x: 20, y: 86, width: 240, height: 28))
+        field.placeholderString = "Mac password"
+        field.font = NSFont.systemFont(ofSize: 14)
+        field.alignment = .center
+        field.target = self
+        field.action = #selector(submitPassword(_:))
+        let unlock = button("Unlock", action: #selector(submitPassword(_:)), outlined: true)
+        unlock.frame = NSRect(x: 20, y: 42, width: 240, height: 36)
+        let cancel = button("Cancel  (esc)", action: #selector(cancelPassword), outlined: false)
+        cancel.frame = NSRect(x: 20, y: 4, width: 240, height: 32)
+        cancel.keyEquivalent = "\u{1b}"
+        for view in [caption, field, unlock, cancel] {
+            box.addSubview(view)
+        }
+        return (box, caption, field)
     }
 
     private func label(_ text: String, size: CGFloat, white: CGFloat, weight: NSFont.Weight) -> NSTextField {

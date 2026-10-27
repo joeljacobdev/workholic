@@ -1,5 +1,4 @@
 import AppKit
-import LocalAuthentication
 import Foundation
 import WorkholicCore
 
@@ -48,9 +47,10 @@ final class AppModel {
     private let pauseOverlay = PauseOverlay()
     /// Shared by the break and pause covers, which never show together.
     private let backlight = Backlight()
-    /// The password prompt for a locked pause that is up, and which ask it is; answers to an older ask are ignored.
-    private var unlockContext: LAContext?
-    private var unlockAttempt = 0
+    /// What the password being asked for in the cover will unlock. Nil when nothing is asked.
+    private var pendingUnlock: Unlocked?
+    /// A password is being checked; typing meanwhile waits for the answer.
+    private var checkingPassword = false
     private static let pauseLocksKey = "pauseNeedsPassword"
     private let power = PowerAssertion()
     /// Keeps the display on while a break covers it, so the break is a dark screen, not a sleeping one.
@@ -107,6 +107,11 @@ final class AppModel {
         pauseOverlay.onPeek = { [weak self] in
             guard let self else { return }
             if self.planCovering { self.planMore() } else { self.unlock(then: .peek) }
+        }
+        pauseOverlay.onPassword = { [weak self] secret in self?.checkPassword(secret) }
+        pauseOverlay.onCancelPassword = { [weak self] in
+            self?.pendingUnlock = nil
+            self?.pauseOverlay.endPasswordPrompt()
         }
         backlight.restoreAfterCrash()
         overlay.backlight = backlight
@@ -383,8 +388,7 @@ final class AppModel {
     private func lowerPlanCover() {
         guard planCovering else { return }
         planCoverSince = nil
-        unlockContext?.invalidate()
-        unlockContext = nil
+        pendingUnlock = nil
         pauseOverlay.hide()
         fitActivationPolicy()
     }
@@ -462,34 +466,30 @@ final class AppModel {
         }
     }
 
-    /// Asks for the Mac's password (or Touch ID) before leaving a locked pause, and always before
-    /// unlocking outside the plan. A Mac with no password to ask for does not lock anyone out.
-    /// A click while a prompt is already open means that prompt is out of sight, perhaps on another
-    /// display, so the old one is closed and a new one asked; ignoring the click left Unpause dead.
+    /// Asks for the Mac's password, in the cover, before leaving a locked pause, and always before
+    /// unlocking outside the plan. A Mac with no account to check against does not lock anyone out.
+    /// The field is on every display, so a click on another display's button just moves the typing there.
     private func unlock(then next: Unlocked) {
         guard pauseLocks || next == .planUnlock else { return proceed(next) }
-        unlockContext?.invalidate()
-        unlockContext = nil
-        let context = LAContext()
-        var error: NSError?
-        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) else { return proceed(next) }
-        unlockAttempt += 1
-        let attempt = unlockAttempt
-        unlockContext = context
-        pauseOverlay.makeRoomForPrompt(true)
-        let reason = next == .planUnlock ? "use this Mac outside your plan" : "unlock the paused screen"
-        context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) { ok, _ in
-            Task { @MainActor [weak self] in
-                guard let self, attempt == self.unlockAttempt else { return }
-                self.unlockContext = nil
-                if ok {
-                    // The cover may have come down while the prompt was up, at a block's start.
-                    if next != .planUnlock || self.planCovering { self.proceed(next) }
-                } else if self.pauseCovering || self.planCovering {
-                    self.pauseOverlay.makeRoomForPrompt(false)
-                    NSApp.activate(ignoringOtherApps: true)
-                }
-            }
+        guard MacPassword.canCheck() else { return proceed(next) }
+        pendingUnlock = next
+        let caption = next == .planUnlock ? "Enter your Mac password to use it outside your plan" : "Enter your Mac password to unlock"
+        pauseOverlay.askPassword(caption: caption)
+    }
+
+    private func checkPassword(_ secret: String) {
+        guard let next = pendingUnlock, !checkingPassword else { return }
+        checkingPassword = true
+        Task { @MainActor [weak self] in
+            let ok = await MacPassword.check(secret)
+            guard let self else { return }
+            self.checkingPassword = false
+            // The ask may have been cancelled, or the cover lowered (at a block's start, say), while checking.
+            guard self.pendingUnlock == next, self.pauseOverlay.isAskingPassword else { return }
+            guard ok else { return self.pauseOverlay.passwordWrong() }
+            self.pendingUnlock = nil
+            self.pauseOverlay.endPasswordPrompt()
+            self.proceed(next)
         }
     }
 
