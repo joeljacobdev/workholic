@@ -565,7 +565,7 @@ export class UserAccount extends DurableObject<Env> {
     const weekday = new Date(`${today}T12:00:00Z`).getUTCDay();
     return {
       commands,
-      shutdown_schedule: legacyShutdown(plan.plan, today, weekday === 0 || weekday === 6),
+      shutdown_schedule: legacyShutdown(plan.plan, today, weekday === 0 || weekday === 6, device.deviceId),
       day_plan_updated_at_ms: plan.updatedAtMs,
       ...(input.planAtMs === plan.updatedAtMs ? {} : { day_plan: plan.plan }),
       settings: {

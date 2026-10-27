@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DEFAULT_PLAN, MAX_BLOCKS, MAX_DEVICES_PER_REQUEST, blocksFor, legacyShutdown, readDayPlan, readDeviceIds } from "../src/plan.ts";
+import { DEFAULT_PLAN, MAX_BLOCKS, MAX_DEVICES_PER_REQUEST, blocksFor, legacyShutdown, readDayPlan, readDeviceIds, shutdownFor } from "../src/plan.ts";
 
 const planner = {
   mode: "planner",
@@ -17,7 +17,7 @@ test("a limit plan with nothing else", () => {
 });
 
 test("a planner with weekday and weekend blocks", () => {
-  assert.deepEqual(readDayPlan(planner), { ...planner, at: null, delay_minutes: 0 });
+  assert.deepEqual(readDayPlan(planner), { ...planner, at: null, delay_minutes: 0, scope: "all", each: {} });
 });
 
 test("a shutdown at a set time, in either mode, with a script", () => {
@@ -122,4 +122,57 @@ test("more Macs than anyone owns is refused", () => {
   const many = Array.from({ length: MAX_DEVICES_PER_REQUEST + 1 }, (_, index) => `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`);
   assert.equal(readDeviceIds(many), "invalid");
   assert.equal((readDeviceIds(many.slice(1)) as string[]).length, MAX_DEVICES_PER_REQUEST);
+});
+
+test("each Mac can have its own shutdown; plans before this read as the same on every Mac", () => {
+  const plan = readDayPlan({ mode: "limit" });
+  assert.notEqual(plan, "invalid");
+  if (plan === "invalid") return;
+  assert.equal(plan.scope, "all");
+  assert.deepEqual(plan.each, {});
+  const own = readDayPlan({
+    mode: "limit", scope: "each", shutdown: "off",
+    each: { [macA]: { shutdown: "time", at: 1290, command: "cal" }, [macB]: { shutdown: "limit", delay_minutes: 30 } },
+  });
+  if (own === "invalid") return assert.fail("a valid plan with entries per Mac");
+  assert.deepEqual(own.each, {
+    [macA]: { shutdown: "time", at: 1290, delay_minutes: 0, command: "cal" },
+    [macB]: { shutdown: "limit", at: null, delay_minutes: 30, command: null },
+  });
+  assert.deepEqual(shutdownFor(own, macA), own.each[macA]);
+  assert.deepEqual(shutdownFor(own, "00000000-0000-4000-8000-000000000000"), { shutdown: "off", at: null, delay_minutes: 0, command: null }, "a Mac not listed does not shut down");
+  assert.deepEqual(legacyShutdown(own, "2026-10-27", false, macA), { when: "time", after: "21:30", delay_minutes: 0, command: "cal" });
+  assert.deepEqual(legacyShutdown(own, "2026-10-27", false, macB), { when: "limit", after: null, delay_minutes: 30, command: null });
+  assert.equal(legacyShutdown(own, "2026-10-27", false, "00000000-0000-4000-8000-000000000000"), null);
+  assert.equal(legacyShutdown(own, "2026-10-27", false), null, "no Mac named, no shutdown under each");
+});
+
+test("under one schedule for every Mac the entries are dropped, and off entries are never kept", () => {
+  const shared = readDayPlan({ mode: "limit", scope: "all", shutdown: "time", at: 600, each: { [macA]: { shutdown: "time", at: 1290 } } });
+  if (shared === "invalid") return assert.fail();
+  assert.deepEqual(shared.each, {});
+  assert.deepEqual(shutdownFor(shared, macA), { shutdown: "time", at: 600, delay_minutes: 0, command: null });
+  assert.deepEqual(legacyShutdown(shared, "2026-10-27", false, macB)?.after, "10:00");
+  const sparse = readDayPlan({ mode: "limit", scope: "each", each: { [macA]: { shutdown: "off", at: 600 }, [macB]: { shutdown: "time", at: 60 } } });
+  if (sparse === "invalid") return assert.fail();
+  assert.deepEqual(Object.keys(sparse.each), [macB]);
+});
+
+test("entries per Mac follow the plan's own rules", () => {
+  for (const each of [
+    { [macA]: { shutdown: "last_block" } },
+    { [macA]: { shutdown: "time" } },
+    { [macA]: { shutdown: "time", at: 1440 } },
+    { [macA]: { shutdown: "limit", delay_minutes: 721 } },
+    { [macA]: { shutdown: "time", at: 600, command: "../x" } },
+    { [macA]: { shutdown: "now" } },
+    { [macA]: "time" },
+    { "not-a-uuid": { shutdown: "time", at: 600 } },
+    [{ shutdown: "time", at: 600 }],
+    Object.fromEntries(Array.from({ length: MAX_DEVICES_PER_REQUEST + 1 }, (_, index) => [`00000000-0000-4000-8000-${String(index).padStart(12, "0")}`, { shutdown: "time", at: 600 }])),
+  ]) {
+    assert.equal(readDayPlan({ mode: "limit", scope: "each", each }), "invalid", JSON.stringify(each));
+  }
+  assert.equal(readDayPlan({ mode: "limit", scope: "some" }), "invalid");
+  assert.notEqual(readDayPlan({ mode: "planner", scope: "each", each: { [macA]: { shutdown: "last_block" } } }), "invalid");
 });

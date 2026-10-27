@@ -181,7 +181,7 @@ final class AppModel {
     }
 
     private func todayShutdownRule(now: Date) -> ShutdownRule? {
-        planShutdownRule(accountPlan, blocks: todayBlocks(now))
+        planShutdownRule(accountPlan, blocks: todayBlocks(now), deviceId: deviceId)
     }
 
     private func minuteOfDay(_ now: Date) -> Int {
@@ -269,6 +269,7 @@ final class AppModel {
             "openAtLogin": LoginItem.isOn,
             "openAtLoginNeedsApproval": LoginItem.needsApproval,
             "pauseLocks": pauseLocks,
+            "deviceId": deviceId,
         ]
     }
 

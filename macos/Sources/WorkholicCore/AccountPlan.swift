@@ -3,12 +3,44 @@ import Foundation
 /// The account's plan for the day, the same on every Mac. Either a daily limit, or time blocks
 /// (one set for weekdays, one for weekends, which today can replace) with the screen covered
 /// outside them. Times are minutes past local midnight on this Mac's clock; a block is `[start, end]`.
+///
+/// The shutdown is one for every Mac (`scope` `.all`), or each Mac's own entry under `each`
+/// (`.each`), with the same four fields either way. A plan from before `scope` reads as `.all`.
 public struct AccountPlan: Sendable, Equatable, Codable {
     public enum Mode: String, Sendable, Codable { case limit, planner }
     public enum Outside: String, Sendable, Codable { case pause, none }
     public enum Shutdown: String, Sendable, Codable {
         case off, time, limit
         case lastBlock = "last_block"
+    }
+    public enum Scope: String, Sendable, Codable { case all, each }
+
+    /// One Mac's own way of shutting down, under `each`.
+    public struct MacShutdown: Sendable, Equatable, Codable {
+        public var shutdown: Shutdown
+        public var at: Int?
+        public var delayMinutes: Int
+        public var command: String?
+
+        public init(shutdown: Shutdown = .off, at: Int? = nil, delayMinutes: Int = 0, command: String? = nil) {
+            self.shutdown = shutdown
+            self.at = at
+            self.delayMinutes = delayMinutes
+            self.command = command
+        }
+
+        public init(from decoder: Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            shutdown = try values.decodeIfPresent(Shutdown.self, forKey: .shutdown) ?? .off
+            at = try values.decodeIfPresent(Int.self, forKey: .at)
+            delayMinutes = try values.decodeIfPresent(Int.self, forKey: .delayMinutes) ?? 0
+            command = try values.decodeIfPresent(String.self, forKey: .command)
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case shutdown, at, command
+            case delayMinutes = "delay_minutes"
+        }
     }
 
     public struct Today: Sendable, Equatable, Codable {
@@ -30,10 +62,13 @@ public struct AccountPlan: Sendable, Equatable, Codable {
     public var at: Int?
     public var delayMinutes: Int
     public var command: String?
+    public var scope: Scope
+    public var each: [String: MacShutdown]
 
     public init(
         mode: Mode = .limit, weekdays: [[Int]] = [], weekends: [[Int]] = [], today: Today? = nil,
-        outside: Outside = .pause, shutdown: Shutdown = .off, at: Int? = nil, delayMinutes: Int = 0, command: String? = nil
+        outside: Outside = .pause, shutdown: Shutdown = .off, at: Int? = nil, delayMinutes: Int = 0, command: String? = nil,
+        scope: Scope = .all, each: [String: MacShutdown] = [:]
     ) {
         self.mode = mode
         self.weekdays = weekdays
@@ -44,10 +79,34 @@ public struct AccountPlan: Sendable, Equatable, Codable {
         self.at = at
         self.delayMinutes = delayMinutes
         self.command = command
+        self.scope = scope
+        self.each = each
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        mode = try values.decode(Mode.self, forKey: .mode)
+        weekdays = try values.decodeIfPresent([[Int]].self, forKey: .weekdays) ?? []
+        weekends = try values.decodeIfPresent([[Int]].self, forKey: .weekends) ?? []
+        today = try values.decodeIfPresent(Today.self, forKey: .today)
+        outside = try values.decodeIfPresent(Outside.self, forKey: .outside) ?? .pause
+        shutdown = try values.decodeIfPresent(Shutdown.self, forKey: .shutdown) ?? .off
+        at = try values.decodeIfPresent(Int.self, forKey: .at)
+        delayMinutes = try values.decodeIfPresent(Int.self, forKey: .delayMinutes) ?? 0
+        command = try values.decodeIfPresent(String.self, forKey: .command)
+        scope = try values.decodeIfPresent(Scope.self, forKey: .scope) ?? .all
+        each = try values.decodeIfPresent([String: MacShutdown].self, forKey: .each) ?? [:]
+    }
+
+    /// How this Mac shuts down: the plan's own way, or its entry, or not at all.
+    public func shutdownFor(deviceId: String?) -> MacShutdown {
+        guard scope == .each else { return MacShutdown(shutdown: shutdown, at: at, delayMinutes: delayMinutes, command: command) }
+        guard let deviceId, let own = each[deviceId] else { return MacShutdown() }
+        return own
     }
 
     private enum CodingKeys: String, CodingKey {
-        case mode, weekdays, weekends, today, outside, shutdown, at, command
+        case mode, weekdays, weekends, today, outside, shutdown, at, command, scope, each
         case delayMinutes = "delay_minutes"
     }
 }
@@ -68,16 +127,21 @@ private func validBlocks(_ blocks: [[Int]]) -> Bool {
 public func validAccountPlan(_ plan: AccountPlan) -> Bool {
     guard validBlocks(plan.weekdays), validBlocks(plan.weekends) else { return false }
     if let today = plan.today, !validBlocks(today.blocks) { return false }
-    switch plan.shutdown {
+    guard validShutdown(plan.shutdownFor(deviceId: nil), mode: plan.mode) else { return false }
+    return plan.each.values.allSatisfy { validShutdown($0, mode: plan.mode) }
+}
+
+private func validShutdown(_ own: AccountPlan.MacShutdown, mode: AccountPlan.Mode) -> Bool {
+    switch own.shutdown {
     case .off: break
     case .time:
-        guard let at = plan.at, (0..<dayMinutes).contains(at) else { return false }
+        guard let at = own.at, (0..<dayMinutes).contains(at) else { return false }
     case .limit:
-        guard plan.mode == .limit, (0...720).contains(plan.delayMinutes) else { return false }
+        guard mode == .limit, (0...720).contains(own.delayMinutes) else { return false }
     case .lastBlock:
-        guard plan.mode == .planner else { return false }
+        guard mode == .planner else { return false }
     }
-    if let command = plan.command, !isScriptName(command) { return false }
+    if let command = own.command, !isScriptName(command) { return false }
     return true
 }
 
@@ -91,20 +155,21 @@ public func minuteText(_ minute: Int) -> String {
     String(format: "%02d:%02d", minute / 60, minute % 60)
 }
 
-/// The plan's shutdown for a day with these blocks, as the rule the shutdown watch keeps.
+/// The plan's shutdown for `deviceId` on a day with these blocks, as the rule the shutdown watch keeps.
 /// The last block ending at midnight shuts down at 23:59. Nil when nothing is due that day.
-public func planShutdownRule(_ plan: AccountPlan, blocks: [[Int]]) -> ShutdownRule? {
-    switch plan.shutdown {
+public func planShutdownRule(_ plan: AccountPlan, blocks: [[Int]], deviceId: String? = nil) -> ShutdownRule? {
+    let own = plan.shutdownFor(deviceId: deviceId)
+    switch own.shutdown {
     case .off:
         return nil
     case .time:
-        guard let at = plan.at else { return nil }
-        return ShutdownRule(when: .time, after: minuteText(at), command: plan.command)
+        guard let at = own.at else { return nil }
+        return ShutdownRule(when: .time, after: minuteText(at), command: own.command)
     case .limit:
-        return ShutdownRule(when: .limit, delayMinutes: plan.delayMinutes, command: plan.command)
+        return ShutdownRule(when: .limit, delayMinutes: own.delayMinutes, command: own.command)
     case .lastBlock:
         guard let last = blocks.last else { return nil }
-        return ShutdownRule(when: .time, after: minuteText(min(last[1], dayMinutes - 1)), command: plan.command)
+        return ShutdownRule(when: .time, after: minuteText(min(last[1], dayMinutes - 1)), command: own.command)
     }
 }
 

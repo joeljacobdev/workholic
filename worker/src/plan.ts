@@ -6,10 +6,22 @@
  *
  * `command` is only a script's file name: the Mac runs it from its own commands folder, so the
  * account can choose among scripts already on that Mac but cannot send it code.
+ *
+ * The shutdown is one for every Mac (`scope` "all"), or each Mac's own entry under `each` ("each"),
+ * with the same four fields either way. Plans saved before `scope` read as "all".
  */
 export type Block = [number, number];
 
-export interface DayPlan {
+/** How and when a Mac shuts down: the plan's own, or one Mac's entry under `each`. */
+export interface MacShutdown {
+  /** "time" uses `at`; "limit" waits `delay_minutes` past the limit; "last_block" is when the last block ends. */
+  shutdown: "off" | "time" | "limit" | "last_block";
+  at: number | null;
+  delay_minutes: number;
+  command: string | null;
+}
+
+export interface DayPlan extends MacShutdown {
   mode: "limit" | "planner";
   weekdays: Block[];
   weekends: Block[];
@@ -17,11 +29,10 @@ export interface DayPlan {
   today: { day: string; blocks: Block[] } | null;
   /** Outside the blocks, in planner mode: cover the screen, or leave it alone. */
   outside: "pause" | "none";
-  /** "time" uses `at`; "limit" waits `delay_minutes` past the limit; "last_block" is when the last block ends. */
-  shutdown: "off" | "time" | "limit" | "last_block";
-  at: number | null;
-  delay_minutes: number;
-  command: string | null;
+  /** "all": the plan's own shutdown on every Mac. "each": a Mac follows its entry in `each`, or none. */
+  scope: "all" | "each";
+  /** By device id, only Macs that shut down. Empty under "all". */
+  each: Record<string, MacShutdown>;
 }
 
 /** A shutdown as Macs before the plan read it. The server still sends one, worked out from the plan. */
@@ -42,7 +53,11 @@ export const DEFAULT_PLAN: DayPlan = {
   at: null,
   delay_minutes: 0,
   command: null,
+  scope: "all",
+  each: {},
 };
+
+const OFF: MacShutdown = { shutdown: "off", at: null, delay_minutes: 0, command: null };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 /** More Macs than anyone owns, so a request naming many is refused rather than half done. */
@@ -97,6 +112,28 @@ export function readDayPlan(value: unknown): DayPlan | "invalid" {
   }
   const outside = record.outside ?? "pause";
   if (outside !== "pause" && outside !== "none") return "invalid";
+  const own = readShutdown(record, mode);
+  if (own === "invalid") return "invalid";
+  const scope = record.scope ?? "all";
+  if (scope !== "all" && scope !== "each") return "invalid";
+  const each: Record<string, MacShutdown> = {};
+  if (scope === "each" && record.each !== undefined && record.each !== null) {
+    const raw = record.each;
+    if (typeof raw !== "object" || Array.isArray(raw)) return "invalid";
+    const entries = Object.entries(raw as Record<string, unknown>);
+    if (entries.length > MAX_DEVICES_PER_REQUEST) return "invalid";
+    for (const [deviceId, value] of entries) {
+      if (!UUID.test(deviceId) || value === null || typeof value !== "object" || Array.isArray(value)) return "invalid";
+      const entry = readShutdown(value as Record<string, unknown>, mode);
+      if (entry === "invalid") return "invalid";
+      if (entry.shutdown !== "off") each[deviceId] = entry;
+    }
+  }
+  return { mode, weekdays, weekends, today, outside, ...own, scope, each };
+}
+
+/** A shutdown's four fields, or "invalid". Only what the way of shutting down uses is kept. */
+function readShutdown(record: Record<string, unknown>, mode: DayPlan["mode"]): MacShutdown | "invalid" {
   const shutdown = record.shutdown ?? "off";
   if (shutdown !== "off" && shutdown !== "time" && shutdown !== "limit" && shutdown !== "last_block") return "invalid";
   // Each way of shutting down belongs to one mode, or to both.
@@ -116,7 +153,13 @@ export function readDayPlan(value: unknown): DayPlan | "invalid" {
     if (typeof record.command !== "string" || !SCRIPT_NAME.test(record.command) || record.command.includes("..")) return "invalid";
     command = record.command;
   }
-  return { mode, weekdays, weekends, today, outside, shutdown, at, delay_minutes: delay, command };
+  return { shutdown, at, delay_minutes: delay, command };
+}
+
+/** How `deviceId` shuts down under this plan: the plan's own way, or its entry, or not at all. */
+export function shutdownFor(plan: DayPlan, deviceId: string | undefined): MacShutdown {
+  if (plan.scope !== "each") return { shutdown: plan.shutdown, at: plan.at, delay_minutes: plan.delay_minutes, command: plan.command };
+  return (deviceId !== undefined && plan.each[deviceId]) || OFF;
 }
 
 /** The blocks that hold on `day`: today's own, or the usual set for a weekday or a weekend. */
@@ -130,16 +173,17 @@ function clock(minute: number): string {
 }
 
 /**
- * The shutdown in the shape Macs before the plan understand, for `day`. The last block ending at
- * midnight shuts down at 23:59, the latest clock time they read. None when nothing is due that day.
+ * The shutdown in the shape Macs before the plan understand, for `day` and `deviceId`. The last block
+ * ending at midnight shuts down at 23:59, the latest clock time they read. None when nothing is due that day.
  */
-export function legacyShutdown(plan: DayPlan, day: string, weekend: boolean): ShutdownSchedule | null {
-  const command = plan.command;
-  switch (plan.shutdown) {
+export function legacyShutdown(plan: DayPlan, day: string, weekend: boolean, deviceId?: string): ShutdownSchedule | null {
+  const own = shutdownFor(plan, deviceId);
+  const command = own.command;
+  switch (own.shutdown) {
     case "time":
-      return { when: "time", after: clock(plan.at ?? 0), delay_minutes: 0, command };
+      return { when: "time", after: clock(own.at ?? 0), delay_minutes: 0, command };
     case "limit":
-      return { when: "limit", after: null, delay_minutes: plan.delay_minutes, command };
+      return { when: "limit", after: null, delay_minutes: own.delay_minutes, command };
     case "last_block": {
       const blocks = blocksFor(plan, day, weekend);
       if (blocks.length === 0) return null;
