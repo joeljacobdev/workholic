@@ -65,6 +65,7 @@ final class PauseOverlay: NSObject {
     private var keepFocus = false
 
     private static let wakeFor: TimeInterval = 8
+    private static let underPrompt = NSWindow.Level(rawValue: NSWindow.Level.screenSaver.rawValue - 1)
 
     private static let kiosk: NSApplication.PresentationOptions = [
         .hideDock, .hideMenuBar, .disableAppleMenu, .disableProcessSwitching,
@@ -198,11 +199,14 @@ final class PauseOverlay: NSObject {
         if locked { NSApp.presentationOptions = [] }
     }
 
-    /// While the password prompt is up, the cover steps below it and the screen brightens to read it.
+    /// While the password prompt is up, the cover steps just below it and the screen brightens to read it.
+    /// The prompt is another process's window at the screen saver level, and that process is the
+    /// active app while it is up, so the kiosk options do not hold: at normal level the cover would
+    /// sit under the Dock and any app clicked there. One level below the prompt, only the prompt shows.
     func makeRoomForPrompt(_ prompting: Bool) {
         self.prompting = prompting
         for window in windows {
-            window.level = prompting ? .normal : .screenSaver
+            window.level = prompting ? Self.underPrompt : .screenSaver
         }
         if prompting { backlight?.restore() } else { dimIfCovered() }
     }
