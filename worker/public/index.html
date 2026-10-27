@@ -146,22 +146,33 @@
         <div class="group">
           <div class="cell">
             <span class="cell-label">Shut down Macs <button type="button" class="info" popovertarget="info-shutdown" aria-label="About the shutdown"></button></span>
-            <div id="info-shutdown" class="info-pop" popover>Each Mac follows its own clock and warns for 60 seconds first, with Cancel.</div>
-            <select id="plan-shutdown" aria-label="Shut down Macs"></select>
+            <div id="info-shutdown" class="info-pop" popover>One schedule for all your Macs, or each Mac on its own; a Mac with nothing set does not shut down. Each follows its own clock and warns for 60 seconds first, with Cancel.</div>
+            <select id="plan-scope" aria-label="Shut down Macs">
+              <option value="all">All the same way</option>
+              <option value="each">Each its own way</option>
+            </select>
           </div>
-          <div class="cell" id="plan-at-row">
-            <span class="cell-label">Time</span>
-            <input id="plan-at" type="time" aria-label="Shutdown time">
+          <div id="plan-shared">
+            <div class="cell">
+              <span class="cell-label">When</span>
+              <select id="plan-shutdown" aria-label="When to shut down"></select>
+            </div>
+            <div class="cell" id="plan-at-row">
+              <span class="cell-label">Time</span>
+              <input id="plan-at" type="time" aria-label="Shutdown time">
+            </div>
+            <div class="cell" id="plan-delay-row">
+              <span class="cell-label">Wait after the limit</span>
+              <span class="fields"><input id="plan-delay" class="num-field" type="number" min="0" max="720" step="5" inputmode="numeric" aria-label="Minutes to wait"> min</span>
+            </div>
+            <div class="cell" id="plan-script-row">
+              <span class="cell-label">Script <button type="button" class="info" popovertarget="info-script" aria-label="About the script"></button></span>
+              <div id="info-script" class="info-pop" popover>Optional. An executable in <code>~/Library/Application Support/tech.joeljacob.workholic/commands/</code> on each Mac that prints a time, such as <code>21:30</code>. A later time puts the shutdown off; it never comes sooner.</div>
+              <input id="plan-command" class="text-field" type="text" placeholder="None" spellcheck="false" autocapitalize="off" aria-label="Script file name">
+            </div>
           </div>
-          <div class="cell" id="plan-delay-row">
-            <span class="cell-label">Wait after the limit</span>
-            <span class="fields"><input id="plan-delay" class="num-field" type="number" min="0" max="720" step="5" inputmode="numeric" aria-label="Minutes to wait"> min</span>
-          </div>
-          <div class="cell" id="plan-script-row">
-            <span class="cell-label">Script <button type="button" class="info" popovertarget="info-script" aria-label="About the script"></button></span>
-            <div id="info-script" class="info-pop" popover>Optional. An executable in <code>~/Library/Application Support/tech.joeljacob.workholic/commands/</code> on each Mac that prints a time, such as <code>21:30</code>. A later time puts the shutdown off; it never comes sooner.</div>
-            <input id="plan-command" class="text-field" type="text" placeholder="None" spellcheck="false" autocapitalize="off" aria-label="Script file name">
-          </div>
+          <div id="plan-each" hidden></div>
+          <p id="plan-each-empty" class="cell note" hidden>No Macs yet. Log in from the Mac app to add one.</p>
         </div>
         <p id="plan-problem" class="problem" role="alert" hidden></p>
         <div class="actions">

@@ -1,6 +1,7 @@
 // The account's devices, and shutting Macs down now: one, or several picked together. Nothing is
 // asked of a Mac until the dialog's button is pressed. The daily shutdown is part of the day plan.
 import { $, AuthError, api, clock, deviceBook, el, handleFailure, onSignOut, swatch, ago } from "./core.js";
+import { setPlanDevices } from "./plan.js";
 import { openDialog } from "./dialog.js";
 
 const ERRORS = {
@@ -219,6 +220,7 @@ function shutDownMany() {
 export async function loadDevices() {
   const stats = await api("/v1/stats");
   const info = stats.device_info ?? [];
+  setPlanDevices(info);
   const device = deviceBook(info);
   const list = $("settings-devices");
   const present = new Set();

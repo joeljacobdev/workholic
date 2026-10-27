@@ -1,10 +1,12 @@
 // "Your day": the account's one plan for all its Macs. A daily limit, or time blocks for weekdays and
-// weekends that today can replace, and how the day ends. Nothing is stored until Save is pressed, and
-// a save that would shut Macs down or cover their screens within the hour asks first.
+// weekends that today can replace, and how the day ends: one shutdown for every Mac, or each Mac's
+// own. Nothing is stored until Save is pressed, and a save that would shut Macs down or cover their
+// screens within the hour asks first.
 import { $, AuthError, api, app, el, formatDuration, handleFailure, minuteOfDay, dayKeyIn, onSignOut, tellMac } from "./core.js";
 import { openDialog } from "./dialog.js";
 
-const DEFAULT_PLAN = { mode: "limit", weekdays: [], weekends: [], today: null, outside: "pause", shutdown: "off", at: null, delay_minutes: 0, command: null };
+const DEFAULT_PLAN = { mode: "limit", weekdays: [], weekends: [], today: null, outside: "pause", shutdown: "off", at: null, delay_minutes: 0, command: null, scope: "all", each: {} };
+const OFF = { shutdown: "off", at: null, delay_minutes: 0, command: null };
 const MAX_BLOCKS = 8;
 const DAY_MINUTES = 1440;
 const SCRIPT_NAME = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,99}$/;
@@ -27,9 +29,15 @@ let saved = null;
 /** The form holds blocks for today only. */
 let todayOwn = false;
 let busy = false;
+/** The account's Macs, as the device list last fetched them, and the row each has under "each its own way". */
+let macs = [];
+const macRows = new Map();
 
 onSignOut(() => {
   saved = null;
+  macs = [];
+  macRows.clear();
+  $("plan-each").replaceChildren();
   $("plan-status").textContent = "";
 });
 
@@ -71,13 +79,21 @@ function normalize(plan, key) {
     mode: p.mode, weekdays: p.weekdays, weekends: p.weekends,
     today: p.today?.day === key ? p.today : null,
     outside: p.outside, shutdown: p.shutdown, at: p.at, delay_minutes: p.delay_minutes, command: p.command,
+    scope: p.scope, each: p.each ?? {},
   };
 }
 
-/** When the plan shuts down today, as a minute, or null. */
-function shutdownMinute(plan, key) {
-  if (plan.shutdown === "time") return plan.at;
-  if (plan.shutdown !== "last_block") return null;
+/** How one Mac shuts down under the plan: the plan's own way, or its entry, or not at all. */
+function shutdownOf(plan, deviceId) {
+  if (plan.scope !== "each") return { shutdown: plan.shutdown, at: plan.at, delay_minutes: plan.delay_minutes, command: plan.command };
+  return plan.each[deviceId] ?? OFF;
+}
+
+/** When the plan shuts a Mac down today, as a minute, or null. */
+function shutdownMinute(plan, key, deviceId) {
+  const own = shutdownOf(plan, deviceId);
+  if (own.shutdown === "time") return own.at;
+  if (own.shutdown !== "last_block") return null;
   const blocks = blocksOn(plan, key);
   return blocks.length ? Math.min(blocks[blocks.length - 1][1], DAY_MINUTES - 1) : null;
 }
@@ -170,33 +186,58 @@ function read() {
     if (!result.ok) return result;
     lists[name] = result.blocks;
   }
-  const shutdown = $("plan-shutdown").value;
-  let at = null;
-  if (shutdown === "time") {
-    at = minutes($("plan-at").value, false);
-    if (at === null) return { ok: false, message: "Enter the time to shut down." };
-  }
-  let delay = 0;
-  if (shutdown === "limit") {
-    delay = Number($("plan-delay").value || 0);
-    if (!Number.isInteger(delay) || delay < 0 || delay > 720) return { ok: false, message: "Wait 0 to 720 whole minutes." };
-  }
-  let command = null;
-  if (shutdown !== "off") {
-    command = $("plan-command").value.trim() || null;
-    if (command !== null && (!SCRIPT_NAME.test(command) || command.includes(".."))) {
-      return { ok: false, message: "A script name is letters, digits, dots, dashes, or underscores, and not a path." };
+  const scope = $("plan-scope").value;
+  let own = OFF;
+  const each = {};
+  if (scope === "all") {
+    const result = readShutdown({ when: $("plan-shutdown"), at: $("plan-at"), delay: $("plan-delay"), command: $("plan-command") }, "");
+    if (!result.ok) return result;
+    own = result.shutdown;
+  } else {
+    // A Mac no longer on the account keeps its entry, so an old entry alone does not read as an edit.
+    const known = new Set(macs.map((mac) => mac.device_id));
+    for (const [id, entry] of Object.entries(saved?.plan.each ?? {})) if (!known.has(id)) each[id] = entry;
+    for (const mac of macs) {
+      const row = macRows.get(mac.device_id);
+      if (!row) continue;
+      const result = readShutdown(row.fields, `${mac.display_name}: `);
+      if (!result.ok) return result;
+      if (result.shutdown.shutdown !== "off") each[mac.device_id] = result.shutdown;
     }
   }
   const plan = {
     mode, weekdays: lists.weekdays, weekends: lists.weekends,
     today: todayOwn ? { day: key, blocks: lists.today } : null,
-    outside: $("plan-outside").value, shutdown, at, delay_minutes: delay, command,
+    outside: $("plan-outside").value, ...own, scope, each,
   };
   return { ok: true, plan, limitMs };
 }
 
-const keyOf = (plan, limitMs) => JSON.stringify([plan, plan.mode === "limit" ? limitMs : null]);
+/** One shutdown's four fields from its controls, or a message saying what to fix, with `who` in front. */
+function readShutdown(fields, who) {
+  const shutdown = fields.when.value;
+  let at = null;
+  if (shutdown === "time") {
+    at = minutes(fields.at.value, false);
+    if (at === null) return { ok: false, message: `${who}Enter the time to shut down.` };
+  }
+  let delay = 0;
+  if (shutdown === "limit") {
+    delay = Number(fields.delay.value || 0);
+    if (!Number.isInteger(delay) || delay < 0 || delay > 720) return { ok: false, message: `${who}Wait 0 to 720 whole minutes.` };
+  }
+  let command = null;
+  if (shutdown !== "off") {
+    command = fields.command.value.trim() || null;
+    if (command !== null && (!SCRIPT_NAME.test(command) || command.includes(".."))) {
+      return { ok: false, message: `${who}A script name is letters, digits, dots, dashes, or underscores, and not a path.` };
+    }
+  }
+  return { ok: true, shutdown: { shutdown, at, delay_minutes: delay, command } };
+}
+
+/** Entries per Mac compare by device id, whatever order they came in. */
+const keyOf = (plan, limitMs) => JSON.stringify([{ ...plan, each: Object.fromEntries(Object.entries(plan.each ?? {}).sort()) }, plan.mode === "limit" ? limitMs : null]);
 
 function edited() {
   const result = read();
@@ -218,16 +259,91 @@ function fill() {
   todayOwn = plan.today !== null;
   setBlocks("today", plan.today?.blocks ?? []);
   $("plan-outside").value = plan.outside;
-  setShutdownOptions(plan.mode);
-  $("plan-shutdown").value = plan.shutdown;
-  $("plan-at").value = hhmm(plan.at ?? 22 * 60);
-  $("plan-delay").value = String(plan.delay_minutes);
-  $("plan-command").value = plan.command ?? "";
+  $("plan-scope").value = plan.scope;
+  fillShutdown({ when: $("plan-shutdown"), at: $("plan-at"), delay: $("plan-delay"), command: $("plan-command") }, plan, plan.mode);
+  for (const [id, row] of macRows) fillShutdown(row.fields, plan.each[id] ?? OFF, plan.mode);
+}
+
+function fillShutdown(fields, own, mode) {
+  setShutdownOptions(mode, fields.when);
+  fields.when.value = own.shutdown;
+  fields.at.value = hhmm(own.at ?? 22 * 60);
+  fields.delay.value = String(own.delay_minutes);
+  fields.command.value = own.command ?? "";
+}
+
+// ---- One row per Mac ----
+
+/** The Macs the rows are for, from the device list. Rows already there keep what is typed in them. */
+export function setPlanDevices(info) {
+  const thisMac = window.workholicMacState?.deviceId ?? null;
+  // This Mac first, inside the app; the rest in enrollment order.
+  macs = [...info].sort((a, b) => (b.device_id === thisMac) - (a.device_id === thisMac));
+  const list = $("plan-each");
+  const present = new Set();
+  macs.forEach((mac, index) => {
+    present.add(mac.device_id);
+    let row = macRows.get(mac.device_id);
+    if (!row) {
+      row = macRow(mac.device_id);
+      macRows.set(mac.device_id, row);
+      const mode = checked("plan-mode") ?? "limit";
+      fillShutdown(row.fields, saved?.plan.each[mac.device_id] ?? OFF, mode);
+    }
+    row.name.textContent = mac.display_name;
+    row.mine.hidden = mac.device_id !== thisMac;
+    if (list.children[index] !== row.item) list.insertBefore(row.item, list.children[index] ?? null);
+  });
+  for (const [id, row] of macRows) {
+    if (present.has(id)) continue;
+    row.item.remove();
+    macRows.delete(id);
+  }
+  showParts();
+}
+
+function macRow(deviceId) {
+  const item = el("div", "cell stacked mac-shutdown");
+  item.dataset.device = deviceId;
+  const name = el("strong");
+  const mine = el("small", "", "this Mac");
+  mine.hidden = true;
+  const label = el("span", "cell-label");
+  label.append(name, mine);
+  const when = el("select");
+  when.setAttribute("aria-label", "When to shut down");
+  const head = el("div", "cell-row");
+  head.append(label, when);
+  const at = el("input");
+  at.type = "time";
+  at.setAttribute("aria-label", "Shutdown time");
+  const delay = el("input", "num-field");
+  delay.type = "number";
+  delay.min = "0";
+  delay.max = "720";
+  delay.step = "5";
+  delay.inputMode = "numeric";
+  delay.setAttribute("aria-label", "Minutes to wait");
+  const delayFields = el("span", "fields");
+  delayFields.append(delay, " min");
+  const command = el("input", "text-field");
+  command.type = "text";
+  command.placeholder = "None";
+  command.spellcheck = false;
+  command.autocapitalize = "off";
+  command.setAttribute("aria-label", "Script file name");
+  const line = (text, control) => {
+    const row = el("div", "cell-row");
+    row.append(el("span", "", text), control);
+    return row;
+  };
+  const rows = { at: line("Time", at), delay: line("Wait after the limit", delayFields), script: line("Script", command) };
+  item.append(head, rows.at, rows.delay, rows.script);
+  return { item, name, mine, rows, fields: { when, at, delay, command } };
 }
 
 /** The shutdown choices that belong to a mode. One that does not carry over becomes "Off". */
-function setShutdownOptions(mode) {
-  const select = $("plan-shutdown");
+function setShutdownOptions(mode, select = $("plan-shutdown")) {
   if (select.dataset.mode === mode) return;
   const before = select.value;
   select.dataset.mode = mode;
@@ -240,10 +356,10 @@ function setShutdownOptions(mode) {
 }
 
 /** The last-block choice says when that is today, so the shutdown time is plain without a note. */
-function labelLastBlock(plan, key) {
-  const option = [...$("plan-shutdown").options].find((entry) => entry.value === "last_block");
+function labelLastBlock(plan, key, select) {
+  const option = [...select.options].find((entry) => entry.value === "last_block");
   if (!option) return;
-  const at = plan ? shutdownMinute({ ...plan, shutdown: "last_block" }, key) : null;
+  const at = plan ? shutdownMinute({ ...plan, scope: "all", shutdown: "last_block" }, key) : null;
   option.textContent = plan && at === null ? "When the last block ends (none today)"
     : at === null ? "When the last block ends" : `When the last block ends (${hhmm(at)} today)`;
 }
@@ -253,11 +369,22 @@ function showParts() {
   const key = todayKey();
   $("plan-limit").hidden = mode !== "limit";
   $("plan-planner").hidden = mode !== "planner";
+  const scope = $("plan-scope").value;
+  $("plan-shared").hidden = scope !== "all";
+  $("plan-each").hidden = scope !== "each";
+  $("plan-each-empty").hidden = scope !== "each" || macs.length > 0;
   setShutdownOptions(mode);
   const shutdown = $("plan-shutdown").value;
   $("plan-at-row").hidden = shutdown !== "time";
   $("plan-delay-row").hidden = shutdown !== "limit";
   $("plan-script-row").hidden = shutdown === "off";
+  for (const row of macRows.values()) {
+    setShutdownOptions(mode, row.fields.when);
+    const own = row.fields.when.value;
+    row.rows.at.hidden = own !== "time";
+    row.rows.delay.hidden = own !== "limit";
+    row.rows.script.hidden = own === "off";
+  }
   $("blocks-today").hidden = $("today-add").hidden = $("today-reset").hidden = !todayOwn;
   $("today-change").hidden = todayOwn;
   for (const name of LISTS) {
@@ -265,7 +392,10 @@ function showParts() {
     if (add) add.disabled = $(`blocks-${name}`).children.length >= MAX_BLOCKS;
   }
   const result = read();
-  if (mode === "planner") labelLastBlock(result.ok ? result.plan : null, key);
+  if (mode === "planner") {
+    labelLastBlock(result.ok ? result.plan : null, key, $("plan-shutdown"));
+    for (const row of macRows.values()) labelLastBlock(result.ok ? result.plan : null, key, row.fields.when);
+  }
   // Only a problem with what is entered is spelled out; the form itself says what the plan does.
   $("plan-problem").textContent = result.ok ? "" : result.message;
   $("plan-problem").hidden = result.ok;
@@ -277,19 +407,33 @@ function showParts() {
 /** What saving would set off within the hour, in words. Empty when nothing soon. */
 async function soonWarnings(plan, limitMs, key) {
   const warnings = [];
-  const at = shutdownMinute(plan, key);
-  if (at !== null && at !== shutdownMinute(saved.plan, key)) {
+  // Under "each its own way", every Mac is looked at by name; under "all", once for all of them.
+  const who = plan.scope === "each" ? macs.map((mac) => ({ id: mac.device_id, name: mac.display_name })) : [{ id: undefined, name: "Your Macs" }];
+  const soon = new Map();
+  for (const mac of who) {
+    const at = shutdownMinute(plan, key, mac.id);
+    if (at === null || at === shutdownMinute(saved.plan, key, mac.id)) continue;
     const until = at - minuteOfDay();
-    if (until > 0 && until <= SOON_MINUTES) {
-      warnings.push(`Your Macs shut down today at ${hhmm(at)}, in ${formatDuration(until * 60_000)}. Each warns for 60 seconds first, with Cancel.`);
-    }
+    if (until > 0 && until <= SOON_MINUTES) soon.set(at, [...(soon.get(at) ?? []), mac.name]);
   }
-  const limitChanged = plan.shutdown === "limit" &&
-    (saved.plan.shutdown !== "limit" || saved.limitMs !== limitMs || saved.plan.delay_minutes !== plan.delay_minutes);
-  if (limitChanged) {
+  for (const [at, names] of soon) {
+    const verb = plan.scope === "each" && names.length === 1 ? "shuts" : "shut";
+    warnings.push(`${names.join(", ")} ${verb} down today at ${hhmm(at)}, in ${formatDuration((at - minuteOfDay()) * 60_000)}. Each warns for 60 seconds first, with Cancel.`);
+  }
+  const afterLimit = who.filter((mac) => {
+    const own = shutdownOf(plan, mac.id);
+    const before = shutdownOf(saved.plan, mac.id);
+    return own.shutdown === "limit" && (before.shutdown !== "limit" || saved.limitMs !== limitMs || before.delay_minutes !== own.delay_minutes);
+  });
+  if (afterLimit.length) {
     const detail = await api(`/v1/days/${key}`);
     if (detail.credited_ms >= limitMs) {
-      warnings.push(`Today's total, ${formatDuration(detail.credited_ms)}, is already past ${formatDuration(limitMs)}. Your Macs shut down ${plan.delay_minutes > 0 ? `${formatDuration(plan.delay_minutes * 60_000)} after crossing it` : CHECK_IN}, each with a 60-second warning.`);
+      const names = afterLimit.map((mac) => mac.name).join(", ");
+      const delays = afterLimit.map((mac) => shutdownOf(plan, mac.id).delay_minutes);
+      const delay = delays.every((value) => value === delays[0]) ? delays[0] : null;
+      const when = delay === null ? "once each one's wait after crossing it is up" : delay > 0 ? `${formatDuration(delay * 60_000)} after crossing it` : CHECK_IN;
+      const verb = plan.scope === "each" && afterLimit.length === 1 ? "shuts" : "shut";
+      warnings.push(`Today's total, ${formatDuration(detail.credited_ms)}, is already past ${formatDuration(limitMs)}. ${names} ${verb} down ${when}, each with a 60-second warning.`);
     }
   }
   if (coversNow(plan, key) && !coversNow(saved.plan, key)) {

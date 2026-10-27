@@ -261,6 +261,10 @@ fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
 fieldset:disabled { opacity: .45; }
 
 /* Time blocks */
+#plan-shared > .cell:first-child, #plan-each > .cell:first-child, #plan-each-empty { border-top: .5px solid var(--line); }
+.mac-shutdown .cell-row > :last-child { margin-left: auto; }
+.mac-shutdown .cell-row + .cell-row { padding-top: 2px; }
+.mac-shutdown .cell-label small { flex-basis: auto; }
 .blocks { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
 .blocks:empty::before { content: "No blocks"; color: var(--muted); }
 .block { display: flex; align-items: center; gap: 8px; color: var(--muted); }

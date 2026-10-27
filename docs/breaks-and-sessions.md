@@ -64,7 +64,9 @@ Settings › Your day holds the account's plan. There is one, not one per Mac. I
 - **Daily limit.** One total for the day, counted across all devices.
 - **Time blocks.** One set of blocks for weekdays and one for weekends, at most 8 each; "Change today only" replaces them for one day. Outside the blocks the Macs either cover the screen or do nothing. The cover is the Pause screen with other words ("Outside your plan", when the next block starts). "15 more minutes" needs no password; "Unlock until HH:MM" always asks for the Mac password and lasts until the next block. It does not keep the Mac awake or lock the keyboard, waits while a break, a call, or your own pause is up, and nothing behind it is counted.
 
-Nothing is stored until Save. A save that would shut Macs down or cover their screens within the hour says so and asks first.
+The shutdown at the end of the day is one choice for every Mac ("All the same way": off, at a set time, after the daily limit, or when the last block ends, with an optional script name) or each Mac's own ("Each its own way": the same choices, one row per enrolled Mac, this Mac marked inside the app window). A Mac with nothing set does not shut down. The plan stores it as `scope` ("all" or "each") and `each`, a map from device id to the same four fields; entries set to off are not stored, and plans saved before `scope` read as "all". "Shut down now" in Settings › Devices is separate: an order for right now, not the daily schedule.
+
+Nothing is stored until Save. A save that would shut Macs down or cover their screens within the hour says so and asks first, naming the Macs when each has its own schedule.
 
 The plan is one row (`day_plan`, a few hundred bytes of JSON; a block is `[start, end]` in minutes past local midnight) saved with `PUT /v1/day-plan` from a login session. The limit itself stays in `budget_version`, so past days keep theirs. A Mac's order check sends the version it has (`GET /v1/devices/{id}/commands?plan_at=<ms>`) and gets the plan back only when it changed. The Mac keeps the last one it heard, so it holds offline; logging out clears it. Times are each Mac's own clock.
 
