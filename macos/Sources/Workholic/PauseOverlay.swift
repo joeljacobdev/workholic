@@ -105,6 +105,7 @@ final class PauseOverlay: NSObject {
             lastInput = .distantPast
             prompting = false
         }
+        up = true
         if NSApp.isHidden { NSApp.unhide(nil) }
         layout()
         for window in windows {
