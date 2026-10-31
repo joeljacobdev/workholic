@@ -13,7 +13,7 @@ const planner = {
 };
 
 test("a limit plan with nothing else", () => {
-  assert.deepEqual(readDayPlan({ mode: "limit" }), DEFAULT_PLAN);
+  assert.deepEqual(readDayPlan({ mode: "limit" }), { ...DEFAULT_PLAN, scope: "all" });
 });
 
 test("a planner with weekday and weekend blocks", () => {
@@ -42,7 +42,7 @@ test("each way of shutting down belongs to its mode", () => {
 
 test("only what the shutdown uses is kept", () => {
   const plan = readDayPlan({ mode: "limit", shutdown: "off", at: 600, delay_minutes: 5, command: "x" });
-  assert.deepEqual(plan, DEFAULT_PLAN);
+  assert.deepEqual(plan, { ...DEFAULT_PLAN, scope: "all" });
 });
 
 test("blocks are in order, apart, and inside the day", () => {
@@ -99,8 +99,8 @@ test("older Macs get the shutdown as a clock time or a limit", () => {
   assert.deepEqual(legacyShutdown(plan, "2026-10-31", true), { when: "time", after: "11:00", delay_minutes: 0, command: null });
   assert.equal(legacyShutdown({ ...plan, weekends: [] }, "2026-10-31", true), null, "no blocks that day, no shutdown");
   assert.deepEqual(legacyShutdown({ ...plan, weekdays: [[1200, 1440]] }, "2026-10-27", false)?.after, "23:59");
-  assert.deepEqual(legacyShutdown({ ...DEFAULT_PLAN, shutdown: "time", at: 1290, command: "cal" }, "2026-10-27", false), { when: "time", after: "21:30", delay_minutes: 0, command: "cal" });
-  assert.deepEqual(legacyShutdown({ ...DEFAULT_PLAN, shutdown: "limit", delay_minutes: 30 }, "2026-10-27", false), { when: "limit", after: null, delay_minutes: 30, command: null });
+  assert.deepEqual(legacyShutdown({ ...DEFAULT_PLAN, scope: "all", shutdown: "time", at: 1290, command: "cal" }, "2026-10-27", false), { when: "time", after: "21:30", delay_minutes: 0, command: "cal" });
+  assert.deepEqual(legacyShutdown({ ...DEFAULT_PLAN, scope: "all", shutdown: "limit", delay_minutes: 30 }, "2026-10-27", false), { when: "limit", after: null, delay_minutes: 30, command: null });
   assert.equal(legacyShutdown(DEFAULT_PLAN, "2026-10-27", false), null);
 });
 
@@ -130,6 +130,7 @@ test("each Mac can have its own shutdown; plans before this read as the same on 
   if (plan === "invalid") return;
   assert.equal(plan.scope, "all");
   assert.deepEqual(plan.each, {});
+  assert.equal(DEFAULT_PLAN.scope, "each", "a new account starts on each its own way");
   const own = readDayPlan({
     mode: "limit", scope: "each", shutdown: "off",
     each: { [macA]: { shutdown: "time", at: 1290, command: "cal" }, [macB]: { shutdown: "limit", delay_minutes: 30 } },

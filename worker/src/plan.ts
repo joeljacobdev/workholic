@@ -53,7 +53,8 @@ export const DEFAULT_PLAN: DayPlan = {
   at: null,
   delay_minutes: 0,
   command: null,
-  scope: "all",
+  // A new account starts on each Mac its own way; a plan stored without `scope` still reads as "all".
+  scope: "each",
   each: {},
 };
 

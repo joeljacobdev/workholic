@@ -220,7 +220,7 @@ function shutDownMany() {
 export async function loadDevices() {
   const stats = await api("/v1/stats");
   const info = stats.device_info ?? [];
-  setPlanDevices(info);
+  setPlanDevices(info.filter(canShutDown));
   const device = deviceBook(info);
   const list = $("settings-devices");
   const present = new Set();

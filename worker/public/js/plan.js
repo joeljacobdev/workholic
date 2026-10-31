@@ -194,9 +194,12 @@ function read() {
     if (!result.ok) return result;
     own = result.shutdown;
   } else {
-    // A Mac no longer on the account keeps its entry, so an old entry alone does not read as an edit.
+    // A Mac with no row (signed out, or gone) keeps its entry, so an old entry alone does not read as
+    // an edit; one the mode no longer allows is dropped, as it has no row to fix it in.
     const known = new Set(macs.map((mac) => mac.device_id));
-    for (const [id, entry] of Object.entries(saved?.plan.each ?? {})) if (!known.has(id)) each[id] = entry;
+    for (const [id, entry] of Object.entries(saved?.plan.each ?? {})) {
+      if (!known.has(id) && SHUTDOWNS[mode].some(([value]) => value === entry.shutdown)) each[id] = entry;
+    }
     for (const mac of macs) {
       const row = macRows.get(mac.device_id);
       if (!row) continue;
