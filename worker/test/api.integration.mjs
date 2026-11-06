@@ -350,6 +350,16 @@ try {
   const viaSettings = (await request("/v1/settings", { token: web })).body;
   assert.equal(viaSettings.day_plan_updated_at_ms, planAt);
   assert.equal(viaSettings.limit_ms, 5 * 3_600_000);
+  // The reminder past the limit is saved with the plan, into the breaks Macs sync.
+  const windDown = { enabled: true, every_minutes: 15, message: "Wind down.", minutes: 3, rest: false };
+  assert.equal((await request("/v1/day-plan", { method: "PUT", token: web, body: { plan: nightly, overtime: { ...windDown, minutes: 0 } } })).status, 422);
+  const breaksBefore = (await request("/v1/breaks", { token: device })).body.updated_at_ms;
+  const withReminder = await request("/v1/day-plan", { method: "PUT", token: web, body: { plan: nightly, limit_ms: 5 * 3_600_000, overtime: windDown } });
+  assert.deepEqual(withReminder.body.overtime, windDown);
+  const breaksAfter = (await request("/v1/breaks", { token: device })).body;
+  assert.deepEqual(breaksAfter.overtime, windDown, "a Mac reads it with the breaks");
+  assert.ok(breaksAfter.updated_at_ms > breaksBefore, "and sees the breaks changed");
+  assert.deepEqual((await request("/v1/settings", { token: web })).body.overtime, windDown);
   const sameLimit = await request("/v1/day-plan", { method: "PUT", token: web, body: { plan: { mode: "planner", weekdays: [[540, 1080]], weekends: [[540, 1080]], shutdown: "last_block" }, limit_ms: 5 * 3_600_000 } });
   assert.equal(sameLimit.body.day_plan.mode, "planner");
   assert.equal((await request(commandsPath, { token: device })).body.shutdown_schedule.after, "18:00", "after the last block, as a clock time for older Macs");

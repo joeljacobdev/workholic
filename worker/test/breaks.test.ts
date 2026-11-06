@@ -84,6 +84,13 @@ test("stored records from before the newer kinds get defaults", () => {
   assert.deepEqual(filled.scheduled, []);
 });
 
+test("the old default reminder past the limit reads as the new one; a message of one's own stays", () => {
+  const old = withBreakDefaults({ ...base, overtime: { ...overtime, message: "You are past today's limit. Step away." } });
+  assert.equal(old.overtime.message, "You have crossed your limit. Try to wind down the work.");
+  assert.equal(old.overtime.every_minutes, overtime.every_minutes);
+  assert.equal(withBreakDefaults({ ...base, overtime }).overtime.message, overtime.message);
+});
+
 test("an older Mac saving the old shape keeps the newer kinds", () => {
   const stored = withBreakDefaults({ ...base, overtime, scheduled: [lunch] });
   const parsed = parseBreakSettings({ ...base, every_minutes: 30 });

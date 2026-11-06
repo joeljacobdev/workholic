@@ -143,6 +143,30 @@
           </div>
         </div>
 
+        <div id="plan-over">
+          <h3>When the limit is reached</h3>
+          <div class="group">
+            <div class="cell">
+              <span class="cell-label"><label for="overtime-enabled">Remind me to wind down</label> <button type="button" class="info" popovertarget="info-overtime" aria-label="About the reminder past the limit"></button></span>
+              <div id="info-overtime" class="info-pop" popover>A pause with your message as you cross the limit, then again after every few minutes of looking. It takes over from the step-away reminder, and holds with breaks off. To shut down instead, or as well, set Shut down Macs to After the daily limit.</div>
+              <input type="checkbox" class="switch" role="switch" id="overtime-enabled">
+            </div>
+            <div id="plan-over-detail">
+              <div class="cell">
+                <span class="cell-label">Then every</span>
+                <span class="fields"><input id="overtime-every" class="num-field" type="number" min="1" max="240" step="1" inputmode="numeric" aria-label="Minutes past the limit"> min past the limit</span>
+              </div>
+              <div class="cell break-rule">
+                <input id="overtime-message" class="text-field msg" maxlength="200" placeholder="What the reminder says" aria-label="Reminder message">
+                <span class="opts">
+                  <label><input id="overtime-minutes" class="num-field" type="number" min="1" max="180" inputmode="numeric" aria-label="Reminder pause minutes"> min</label>
+                  <label><input id="overtime-rest" type="checkbox"> Screen off ends it</label>
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <div class="group">
           <div class="cell">
             <span class="cell-label">Shut down Macs <button type="button" class="info" popovertarget="info-shutdown" aria-label="About the shutdown"></button></span>
@@ -203,26 +227,6 @@
             </div>
             <ol id="breaks-items" class="break-items"></ol>
             <div class="cell"><button type="button" id="breaks-add" class="add">Add pause</button></div>
-          </div>
-
-          <h3>Past the daily limit</h3>
-          <div class="group">
-            <div class="cell">
-              <span class="cell-label"><label for="overtime-enabled">Keep pausing once today’s limit is reached</label> <button type="button" class="info" popovertarget="info-overtime" aria-label="About pausing past the limit"></button></span>
-              <div id="info-overtime" class="info-pop" popover>Takes over from the step-away reminder once the limit is reached, so sessions get shorter.</div>
-              <input type="checkbox" class="switch" role="switch" id="overtime-enabled">
-            </div>
-            <div class="cell">
-              <span class="cell-label">Every</span>
-              <span class="fields"><input id="overtime-every" class="num-field" type="number" min="1" max="240" step="1" inputmode="numeric" aria-label="Minutes past the limit"> min past the limit</span>
-            </div>
-            <div class="cell break-rule">
-              <input id="overtime-message" class="text-field msg" maxlength="200" placeholder="What this pause is for" aria-label="Overtime pause message">
-              <span class="opts">
-                <label><input id="overtime-minutes" class="num-field" type="number" min="1" max="180" inputmode="numeric" aria-label="Overtime pause minutes"> min</label>
-                <label><input id="overtime-rest" type="checkbox"> Screen off ends it</label>
-              </span>
-            </div>
           </div>
 
           <h3>At set times</h3>

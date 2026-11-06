@@ -65,10 +65,13 @@ export const DEFAULT_SESSION_BREAK: SessionBreak = {
 export const DEFAULT_OVERTIME: OvertimeBreak = {
   enabled: false,
   every_minutes: 25,
-  message: "You are past today's limit. Step away.",
+  message: "You have crossed your limit. Try to wind down the work.",
   minutes: 5,
   rest: true,
 };
+
+/** The message the overtime pause had by default before. Stored unchanged, it reads as today's default. */
+const OLD_OVERTIME_MESSAGE = "You are past today's limit. Step away.";
 
 export const DEFAULT_BREAKS: BreakSettings = {
   enabled: true,
@@ -98,7 +101,7 @@ function parseSessionBreak(value: unknown): SessionBreak | null {
   return { enabled: record.enabled, message: text, minutes: record.minutes as number, rest: record.rest };
 }
 
-function parseOvertime(value: unknown): OvertimeBreak | null {
+export function parseOvertime(value: unknown): OvertimeBreak | null {
   const base = parseSessionBreak(value);
   if (!base) return null;
   const every = (value as Record<string, unknown>).every_minutes;
@@ -171,7 +174,7 @@ export function withBreakDefaults(stored: BreakSettingsInput): BreakSettings {
     items: stored.items,
     recurring_enabled: stored.recurring_enabled ?? DEFAULT_BREAKS.recurring_enabled,
     session_break: stored.session_break ?? DEFAULT_SESSION_BREAK,
-    overtime: stored.overtime ?? DEFAULT_OVERTIME,
+    overtime: stored.overtime?.message === OLD_OVERTIME_MESSAGE ? { ...stored.overtime, message: DEFAULT_OVERTIME.message } : (stored.overtime ?? DEFAULT_OVERTIME),
     scheduled: stored.scheduled ?? [],
   };
 }

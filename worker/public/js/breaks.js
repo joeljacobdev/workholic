@@ -1,4 +1,4 @@
-// Breaks: the every-few-minutes pauses, the past-the-limit pause, and the set-time pauses.
+// Breaks: the every-few-minutes pauses and the set-time pauses. The past-the-limit pause is in Your day.
 import { $, AuthError, api, app, el, handleFailure, onSignOut, tellMac } from "./core.js";
 
 const BREAK_ERRORS = {
@@ -6,7 +6,6 @@ const BREAK_ERRORS = {
   bad_items: "Keep between 1 and 20 pauses.",
   bad_item_message: "Every pause needs a short message (up to 200 characters).",
   bad_item_minutes: "Each pause lasts 1 to 180 minutes.",
-  bad_overtime: "The past-the-limit pause needs a message, 1 to 180 minutes, and a gap of 1 to 240 minutes.",
   bad_scheduled: "Each set time needs a time, a message, and 1 to 180 minutes (up to 10 times).",
 };
 let breaksDirty = false;
@@ -102,22 +101,6 @@ function syncScheduledAdd() {
   $("scheduled-add").disabled = $("scheduled-items").children.length >= 10;
 }
 
-function renderRule(prefix, rule) {
-  $(`${prefix}-enabled`).checked = rule.enabled;
-  $(`${prefix}-message`).value = rule.message;
-  $(`${prefix}-minutes`).value = String(rule.minutes);
-  $(`${prefix}-rest`).checked = rule.rest;
-}
-
-function readRule(prefix) {
-  return {
-    enabled: $(`${prefix}-enabled`).checked,
-    message: $(`${prefix}-message`).value.trim(),
-    minutes: Number($(`${prefix}-minutes`).value),
-    rest: $(`${prefix}-rest`).checked,
-  };
-}
-
 function renderBreaks(settings) {
   $("breaks-enabled").checked = settings.enabled;
   $("breaks-detail").disabled = !settings.enabled;
@@ -125,10 +108,6 @@ function renderBreaks(settings) {
   $("breaks-every").value = String(settings.every_minutes);
   $("breaks-items").replaceChildren(...settings.items.map(breakRow));
   syncRemoveButtons();
-  if (settings.overtime) {
-    renderRule("overtime", settings.overtime);
-    $("overtime-every").value = String(settings.overtime.every_minutes);
-  }
   $("scheduled-items").replaceChildren(...(settings.scheduled ?? []).map(scheduledRow));
   syncScheduledAdd();
   breaksDirty = false;
@@ -184,7 +163,7 @@ async function saveBreaks(event) {
     every_minutes: Number($("breaks-every").value),
     items,
     recurring_enabled: $("breaks-recurring").checked,
-    overtime: { ...readRule("overtime"), every_minutes: Number($("overtime-every").value) },
+    // The past-the-limit pause is saved with Your day; left out here, the server keeps it.
     scheduled,
   };
   $("breaks-save").disabled = true;

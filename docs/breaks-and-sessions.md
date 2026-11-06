@@ -15,7 +15,7 @@ Breaks are how a session ends when you would not end it yourself. The Mac counts
 | Break | When it comes |
 |---|---|
 | Every few minutes | After N minutes of looking since the last break |
-| Past the limit | Once today's limit is reached, after every N minutes past it. It replaces the every-few-minutes break, so sessions get shorter |
+| Past the limit | As today's limit is crossed, then after every N minutes past it. It replaces the every-few-minutes break, so sessions get shorter. Set in Your day, and on with breaks off |
 | At set times | At a clock time, such as lunch |
 | By hand | Whenever you start one from the menu bar |
 
@@ -61,7 +61,7 @@ Settings › Devices has "Shut down now…" beside each Mac, and a box to pick s
 
 Settings › Your day holds the account's plan. There is one, not one per Mac. It is one of two modes:
 
-- **Daily limit.** One total for the day, counted across all devices.
+- **Daily limit.** One total for the day, counted across all devices. "When the limit is reached" can remind you to wind down: a pause with your message (by default "You have crossed your limit. Try to wind down the work.") as the limit is crossed, then after every N minutes of looking past it. It holds with breaks off. A crossing counts only when the Mac saw the total under the limit earlier that day, so a Mac started already over waits the N minutes. The shutdown "After the daily limit" below can follow it, or come instead. The reminder is stored with the breaks as `overtime`, which Macs already sync; `PUT /v1/day-plan` takes it as `overtime` and `/v1/settings` reports it.
 - **Time blocks.** One set of blocks for weekdays and one for weekends, at most 8 each; "Change today only" replaces them for one day. Outside the blocks the Macs either cover the screen or do nothing. The cover is the Pause screen with other words ("Outside your plan", when the next block starts). "15 more minutes" needs no password; "Unlock until HH:MM" always asks for the Mac password and lasts until the next block. It does not keep the Mac awake or lock the keyboard, waits while a break, a call, or your own pause is up, and nothing behind it is counted.
 
 The shutdown at the end of the day is one choice for every Mac ("All the same way": off, at a set time, after the daily limit, or when the last block ends, with an optional script name) or each Mac's own ("Each its own way": the same choices, one row per enrolled Mac, this Mac marked inside the app window). A Mac with nothing set does not shut down. The plan stores it as `scope` ("all" or "each") and `each`, a map from device id to the same four fields; entries set to off are not stored, and plans saved before `scope` read as "all". "Shut down now" in Settings › Devices is separate: an order for right now, not the daily schedule.

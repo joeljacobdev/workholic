@@ -306,6 +306,7 @@ async function settings(request: Request, env: Env): Promise<Response> {
     breaks_updated_at_ms: result.breaksUpdatedAtMs,
     day_plan: result.dayPlan,
     day_plan_updated_at_ms: result.dayPlanUpdatedAtMs,
+    overtime: result.overtime,
   });
 }
 
@@ -399,7 +400,10 @@ async function requestShutdowns(request: Request, env: Env): Promise<Response> {
   return commandResponse(await account(env, userId).requestShutdowns({ sessionToken: token, deviceIds, now: Date.now() }));
 }
 
-/** Body `{ "plan": {...}, "limit_ms"?: number }`: the account's plan, and its daily limit when given. */
+/**
+ * Body `{ "plan": {...}, "limit_ms"?: number, "overtime"?: {...} }`: the account's plan, its daily
+ * limit, and the past-the-limit pause, each when given.
+ */
 async function putDayPlan(request: Request, env: Env): Promise<Response> {
   const token = bearer(request);
   if (!token) return json({ error: "bad_token" }, 401);
@@ -410,7 +414,7 @@ async function putDayPlan(request: Request, env: Env): Promise<Response> {
   const record = asRecord(body.value);
   if (!record) return json({ error: "bad_plan" }, 422);
   return commandResponse(
-    await account(env, userId).setDayPlan({ sessionToken: token, plan: record.plan, limitMs: record.limit_ms, now: Date.now() }),
+    await account(env, userId).setDayPlan({ sessionToken: token, plan: record.plan, limitMs: record.limit_ms, overtime: record.overtime, now: Date.now() }),
   );
 }
 

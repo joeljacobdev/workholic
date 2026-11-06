@@ -25,7 +25,7 @@ struct OvertimeRule: Codable, Equatable, Sendable {
         case rest
     }
 
-    static let standard = OvertimeRule(enabled: false, everyMinutes: 25, message: "You are past today's limit. Step away.", minutes: 5, rest: true)
+    static let standard = OvertimeRule(enabled: false, everyMinutes: 25, message: "You have crossed your limit. Try to wind down the work.", minutes: 5, rest: true)
 }
 
 /// A pause at a local clock time. `at` is 24-hour `HH:MM`.
@@ -95,13 +95,14 @@ struct BreakPlan: Codable, Equatable {
         return DueBreak(message: item.message, durationMs: Int64(max(1, item.minutes)) * 60_000, rest: item.rest)
     }
 
+    /// The past-the-limit pause is set with the daily limit, so the breaks switch does not turn it off.
     var overtimeDue: DueBreak? {
-        guard enabled, overtime.enabled else { return nil }
+        guard overtime.enabled else { return nil }
         return DueBreak(message: overtime.message, durationMs: Int64(max(1, overtime.minutes)) * 60_000, rest: overtime.rest, kind: .overtime)
     }
 
     /// Zero turns overtime pauses off.
-    var overtimeAfterMs: Int64 { enabled && overtime.enabled ? Int64(max(1, overtime.everyMinutes)) * 60_000 : 0 }
+    var overtimeAfterMs: Int64 { overtime.enabled ? Int64(max(1, overtime.everyMinutes)) * 60_000 : 0 }
 
     var scheduledEntries: [ScheduledBreak] {
         guard enabled else { return [] }

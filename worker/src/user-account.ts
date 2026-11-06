@@ -1,5 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
-import { DEFAULT_BREAKS, mergeBreakSettings, withBreakDefaults, type BreakSettings, type BreakSettingsInput } from "./breaks";
+import { DEFAULT_BREAKS, mergeBreakSettings, parseOvertime, withBreakDefaults, type BreakSettings, type BreakSettingsInput, type OvertimeBreak } from "./breaks";
 import { limitCutoff, standingLimit } from "./ceiling";
 import { dayKey, dayWindow, daysTouched } from "./day";
 import { restartIfOlder, type CodeVersion } from "./fresh";
@@ -411,6 +411,7 @@ export class UserAccount extends DurableObject<Env> {
     breaksUpdatedAtMs: number;
     dayPlan: DayPlan;
     dayPlanUpdatedAtMs: number;
+    overtime: OvertimeBreak;
   } | null> {
     const allowed = (await this.sessionFor(input.token, input.now)) || (await this.deviceFor(input.token));
     if (!allowed) return null;
@@ -424,6 +425,7 @@ export class UserAccount extends DurableObject<Env> {
       breaksUpdatedAtMs: this.breaksUpdatedAtMs(),
       dayPlan: plan.plan,
       dayPlanUpdatedAtMs: plan.updatedAtMs,
+      overtime: this.currentBreaks().overtime,
     };
   }
 
@@ -441,10 +443,11 @@ export class UserAccount extends DurableObject<Env> {
    * Saves the plan, and the daily limit with it when one is given and differs. Only a login session
    * may. The limit stays in budget_version, so past days keep the limit they had.
    */
-  async setDayPlan(input: { sessionToken: string; plan: unknown; limitMs: unknown; now: number }): Promise<CommandResult<{
+  async setDayPlan(input: { sessionToken: string; plan: unknown; limitMs: unknown; overtime?: unknown; now: number }): Promise<CommandResult<{
     day_plan: DayPlan;
     day_plan_updated_at_ms: number;
     limit_ms: number | null;
+    overtime: OvertimeBreak;
   }>> {
     if (!(await this.sessionFor(input.sessionToken, input.now))) return { error: "bad_token", status: 401 };
     const plan = readDayPlan(input.plan);
@@ -453,15 +456,33 @@ export class UserAccount extends DurableObject<Env> {
     if (limitMs !== undefined && limitMs !== null && (!Number.isInteger(limitMs) || (limitMs as number) < 0 || (limitMs as number) > 24 * 3_600_000)) {
       return { error: "bad_limit", status: 422 };
     }
+    // The past-the-limit pause is set with the limit but kept with the breaks, which Macs already sync.
+    const overtime = input.overtime === undefined ? null : parseOvertime(input.overtime);
+    if (input.overtime !== undefined && !overtime) return { error: "bad_overtime", status: 422 };
     this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec(
         "INSERT INTO day_plan (id, plan_json, updated_at_ms) VALUES (1, ?, ?) ON CONFLICT (id) DO UPDATE SET plan_json = excluded.plan_json, updated_at_ms = excluded.updated_at_ms",
         JSON.stringify(plan),
         input.now,
       );
+      if (overtime && JSON.stringify(overtime) !== JSON.stringify(this.currentBreaks().overtime)) {
+        this.ctx.storage.sql.exec(
+          "INSERT INTO break_settings (id, settings_json, updated_at_ms) VALUES (1, ?, ?) ON CONFLICT (id) DO UPDATE SET settings_json = excluded.settings_json, updated_at_ms = excluded.updated_at_ms",
+          JSON.stringify({ ...this.currentBreaks(), overtime }),
+          input.now,
+        );
+      }
     });
     if (typeof limitMs === "number" && limitMs !== this.ceilingMs(input.now)) await this.setLimit({ limitMs, now: input.now });
-    return { day_plan: plan, day_plan_updated_at_ms: input.now, limit_ms: this.ceilingMs(input.now) };
+    return { day_plan: plan, day_plan_updated_at_ms: input.now, limit_ms: this.ceilingMs(input.now), overtime: this.currentBreaks().overtime };
+  }
+
+  /** The stored breaks, or the defaults until someone saves. */
+  private currentBreaks(): BreakSettings {
+    const row = this.ctx.storage.sql
+      .exec<{ settings_json: string }>("SELECT settings_json FROM break_settings WHERE id = 1")
+      .toArray()[0];
+    return row ? this.storedBreaks(row.settings_json) : DEFAULT_BREAKS;
   }
 
   private breaksUpdatedAtMs(): number {
@@ -485,11 +506,7 @@ export class UserAccount extends DurableObject<Env> {
   async setBreaks(input: { sessionToken: string; settings: BreakSettingsInput; now: number }): Promise<(BreakSettings & { updated_at_ms: number }) | null> {
     const session = await this.sessionFor(input.sessionToken, input.now);
     if (!session) return null;
-    const row = this.ctx.storage.sql
-      .exec<{ settings_json: string }>("SELECT settings_json FROM break_settings WHERE id = 1")
-      .toArray()[0];
-    const stored = row ? this.storedBreaks(row.settings_json) : DEFAULT_BREAKS;
-    const settings = mergeBreakSettings(stored, input.settings);
+    const settings = mergeBreakSettings(this.currentBreaks(), input.settings);
     this.ctx.storage.sql.exec(
       "INSERT INTO break_settings (id, settings_json, updated_at_ms) VALUES (1, ?, ?) ON CONFLICT (id) DO UPDATE SET settings_json = excluded.settings_json, updated_at_ms = excluded.updated_at_ms",
       JSON.stringify(settings),

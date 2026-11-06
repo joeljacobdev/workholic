@@ -7,6 +7,8 @@ import { openDialog } from "./dialog.js";
 
 const DEFAULT_PLAN = { mode: "limit", weekdays: [], weekends: [], today: null, outside: "pause", shutdown: "off", at: null, delay_minutes: 0, command: null, scope: "all", each: {} };
 const OFF = { shutdown: "off", at: null, delay_minutes: 0, command: null };
+/** The past-the-limit pause until the account says otherwise. */
+const DEFAULT_OVERTIME = { enabled: false, every_minutes: 25, message: "You have crossed your limit. Try to wind down the work.", minutes: 5, rest: true };
 const MAX_BLOCKS = 8;
 const DAY_MINUTES = 1440;
 const SCRIPT_NAME = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,99}$/;
@@ -22,9 +24,10 @@ const SHUTDOWNS = {
 const ERRORS = {
   bad_plan: "The plan did not pass the server's checks. Check the blocks, the times, and the script name.",
   bad_limit: "Enter a limit between 0 and 24 hours.",
+  bad_overtime: "The reminder needs a message, 1 to 180 minutes, and a gap of 1 to 240 minutes.",
 };
 
-/** The plan and limit as last stored, with a stale "today only" left out. */
+/** The plan, limit, and past-the-limit pause as last stored, with a stale "today only" left out. */
 let saved = null;
 /** The form holds blocks for today only. */
 let todayOwn = false;
@@ -165,11 +168,12 @@ function readBlocks(name) {
 
 const checked = (name) => document.querySelector(`input[name="${name}"]:checked`)?.value;
 
-/** The plan as the server stores it, plus the limit, or a message saying what to fix. */
+/** The plan as the server stores it, plus the limit and the past-the-limit pause, or a message saying what to fix. */
 function read() {
   const key = todayKey();
   const mode = checked("plan-mode") ?? "limit";
   let limitMs = null;
+  let overtime = saved?.overtime ?? DEFAULT_OVERTIME;
   if (mode === "limit") {
     const hours = Number($("limit-hours").value || 0);
     const mins = Number($("limit-minutes").value || 0);
@@ -178,6 +182,9 @@ function read() {
       return { ok: false, message: "Enter whole hours (0–24) and minutes (0–59)." };
     }
     limitMs = (hours * 60 + mins) * 60_000;
+    const result = readOvertime(overtime);
+    if (!result.ok) return result;
+    overtime = result.overtime;
   }
   const lists = {};
   for (const name of LISTS) {
@@ -213,7 +220,19 @@ function read() {
     today: todayOwn ? { day: key, blocks: lists.today } : null,
     outside: $("plan-outside").value, ...own, scope, each,
   };
-  return { ok: true, plan, limitMs };
+  return { ok: true, plan, limitMs, overtime };
+}
+
+/** The past-the-limit pause from its controls. Turned off, it keeps what was stored, as the fields are hidden. */
+function readOvertime(stored) {
+  if (!$("overtime-enabled").checked) return { ok: true, overtime: { ...stored, enabled: false } };
+  const every = Number($("overtime-every").value);
+  const minutes = Number($("overtime-minutes").value);
+  const message = $("overtime-message").value.trim();
+  if (!Number.isInteger(every) || every < 1 || every > 240) return { ok: false, message: "Remind again every 1 to 240 whole minutes." };
+  if (message === "") return { ok: false, message: "Enter what the reminder says." };
+  if (!Number.isInteger(minutes) || minutes < 1 || minutes > 180) return { ok: false, message: "The reminder lasts 1 to 180 whole minutes." };
+  return { ok: true, overtime: { enabled: true, every_minutes: every, message, minutes, rest: $("overtime-rest").checked } };
 }
 
 /** One shutdown's four fields from its controls, or a message saying what to fix, with `who` in front. */
@@ -240,15 +259,25 @@ function readShutdown(fields, who) {
 }
 
 /** Entries per Mac compare by device id, whatever order they came in. */
-const keyOf = (plan, limitMs) => JSON.stringify([{ ...plan, each: Object.fromEntries(Object.entries(plan.each ?? {}).sort()) }, plan.mode === "limit" ? limitMs : null]);
+const keyOf = (plan, limitMs, overtime) => JSON.stringify([
+  { ...plan, each: Object.fromEntries(Object.entries(plan.each ?? {}).sort()) },
+  plan.mode === "limit" ? limitMs : null,
+  plan.mode === "limit" ? overtimeKey(overtime) : null,
+]);
+const overtimeKey = (o) => [o.enabled, o.every_minutes, o.message, o.minutes, o.rest];
 
 function edited() {
   const result = read();
-  return !result.ok || keyOf(result.plan, result.limitMs) !== keyOf(saved.plan, saved.limitMs);
+  return !result.ok || keyOf(result.plan, result.limitMs, result.overtime) !== keyOf(saved.plan, saved.limitMs, saved.overtime);
 }
 
 function fill() {
-  const { plan, limitMs } = saved;
+  const { plan, limitMs, overtime } = saved;
+  $("overtime-enabled").checked = overtime.enabled;
+  $("overtime-every").value = String(overtime.every_minutes);
+  $("overtime-message").value = overtime.message;
+  $("overtime-minutes").value = String(overtime.minutes);
+  $("overtime-rest").checked = overtime.rest;
   $(`plan-mode-${plan.mode}`).checked = true;
   if (limitMs != null) {
     const total = Math.round(limitMs / 60_000);
@@ -372,6 +401,8 @@ function showParts() {
   const key = todayKey();
   $("plan-limit").hidden = mode !== "limit";
   $("plan-planner").hidden = mode !== "planner";
+  $("plan-over").hidden = mode !== "limit";
+  $("plan-over-detail").hidden = !$("overtime-enabled").checked;
   const scope = $("plan-scope").value;
   $("plan-shared").hidden = scope !== "all";
   $("plan-each").hidden = scope !== "each";
@@ -461,12 +492,16 @@ async function save(event) {
     if (warnings.length && !(await openDialog({ title: "Save this plan?", body: warnings, confirmLabel: "Save", danger: true }))) return;
     status.textContent = "Saving…";
     const body = { plan: result.plan };
-    if (result.plan.mode === "limit") body.limit_ms = result.limitMs;
+    if (result.plan.mode === "limit") {
+      body.limit_ms = result.limitMs;
+      body.overtime = result.overtime;
+    }
     const answer = await api("/v1/day-plan", { method: "PUT", body });
     app.settings.day_plan = answer.day_plan;
     app.settings.day_plan_updated_at_ms = answer.day_plan_updated_at_ms;
     app.settings.limit_ms = answer.limit_ms;
-    saved = { plan: normalize(answer.day_plan, key), limitMs: answer.limit_ms };
+    app.settings.overtime = answer.overtime;
+    saved = { plan: normalize(answer.day_plan, key), limitMs: answer.limit_ms, overtime: answer.overtime };
     fill();
     status.textContent = "Saved";
     tellMac("saved");
@@ -483,11 +518,11 @@ async function save(event) {
 export function renderPlan() {
   if (!app.settings || busy) return;
   const key = todayKey();
-  const next = { plan: normalize(currentPlan(), key), limitMs: app.settings.limit_ms };
+  const next = { plan: normalize(currentPlan(), key), limitMs: app.settings.limit_ms, overtime: app.settings.overtime ?? DEFAULT_OVERTIME };
   if (saved === null || !edited()) {
     saved = next;
     fill();
-  } else if (keyOf(next.plan, next.limitMs) !== keyOf(saved.plan, saved.limitMs)) {
+  } else if (keyOf(next.plan, next.limitMs, next.overtime) !== keyOf(saved.plan, saved.limitMs, saved.overtime)) {
     saved = next;
     $("plan-status").textContent = "The plan was changed elsewhere. Saving replaces that with what is here.";
   }

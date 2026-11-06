@@ -42,6 +42,8 @@ final class AppModel {
     /// Past the daily limit with overtime pauses on, as of the last sample.
     /// The overtime stretch then replaces the every-few-minutes one.
     private var overtimeInCharge = false
+    /// When today's limit was crossed, for the past-the-limit pause that comes as it is crossed.
+    private var overtimeCrossing = LimitCrossing()
     /// Scheduled entries already shown or skipped, by id, with the civil day they were handled on.
     private var scheduledHandled: [String: String]
     private let pauseOverlay = PauseOverlay()
@@ -318,7 +320,8 @@ final class AppModel {
         if isPaused {
             return pauseCovering ? "Paused. Not counted, and this Mac stays awake." : "Unpaused for 5 minutes."
         }
-        guard plan.enabled else { return "Breaks are off." }
+        // The past-the-limit pause is part of the day plan, so it holds with breaks off.
+        guard plan.enabled || overtimeInCharge else { return "Breaks are off." }
         if let active = reminder.activeBreak {
             return active.paused ? "Break waits until the call ends." : "On a break."
         }
@@ -828,6 +831,15 @@ final class AppModel {
         let over = overLimit(now: now)
         // Past the limit, the overtime stretch replaces the every-few-minutes one.
         overtimeInCharge = over && plan.overtimeAfterMs > 0
+        // The first past-the-limit pause comes as the limit is crossed, the rest every few minutes after.
+        // Signed in, the total is not known until the first sync, and a low local count is not "under".
+        if !signedIn || syncedCreditedMs != nil {
+            let crossing = limitCrossingStep(overtimeCrossing, day: civilDay(now), over: over, now: now)
+            if crossing.crossedAt != nil, overtimeCrossing.crossedAt == nil, reminder.extraDue == nil, let due = plan.overtimeDue {
+                reminder.extraDue = due
+            }
+            overtimeCrossing = crossing
+        }
         var stepConfig = reminderConfig
         if overtimeInCharge { stepConfig.breakAfterMs = 0 }
         // The pause and plan covers hold every break the way a call does.
