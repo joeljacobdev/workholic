@@ -15,7 +15,7 @@ const SCRIPT_NAME = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,99}$/;
 /** A save that would shut down or cover this many minutes from now, or sooner, asks first. */
 const SOON_MINUTES = 60;
 const CHECK_IN = "within 5 minutes";
-const PLAN_END_LABEL = "After the last block or the daily limit";
+const PLAN_END_LABEL = "After the blocks or the limit";
 const SHUTDOWNS = [["off", "Off"], ["plan_end", PLAN_END_LABEL], ["time", "At a set time"]];
 
 const ERRORS = {
@@ -432,8 +432,7 @@ function labelPlanEnd(plan, key, select) {
   const option = [...select.options].find((entry) => entry.value === "plan_end");
   if (!option) return;
   const at = plan ? shutdownMinute({ ...plan, scope: "all", shutdown: "plan_end" }, key) : null;
-  option.textContent = plan && at === null ? `${PLAN_END_LABEL} (the limit today)`
-    : at === null ? PLAN_END_LABEL : `${PLAN_END_LABEL} (${hhmm(at)} today)`;
+  option.textContent = at === null ? PLAN_END_LABEL : `${PLAN_END_LABEL} (${hhmm(at)})`;
 }
 
 function showParts() {
