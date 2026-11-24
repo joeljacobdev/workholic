@@ -279,5 +279,41 @@
       <button type="button" id="dialog-ok" class="btn default"></button>
     </div>
   </dialog>
+
+  <dialog id="day-editor" class="day-editor" aria-label="Time blocks">
+    <div class="day-editor-head">
+      <button type="button" id="day-editor-prev" class="step" aria-label="Previous day">‹</button>
+      <input id="day-editor-date" type="date" aria-label="Date">
+      <button type="button" id="day-editor-next" class="step" aria-label="Next day">›</button>
+      <button type="button" id="day-editor-close" class="step day-editor-close" aria-label="Close">×</button>
+    </div>
+    <p id="day-editor-summary" class="day-editor-summary secondary"></p>
+    <div id="day-editor-scroll" class="day-editor-scroll">
+      <div id="day-editor-day" class="day-column" role="group">
+        <div id="day-editor-hours" class="day-hours" aria-hidden="true"></div>
+        <div id="day-editor-now" class="day-now" aria-hidden="true" hidden></div>
+        <div id="day-editor-blocks"></div>
+        <div id="day-editor-drag" class="day-drag" aria-hidden="true" hidden></div>
+      </div>
+    </div>
+    <div class="day-editor-foot">
+      <p id="day-editor-problem" class="problem" role="alert" hidden></p>
+      <div id="day-editor-edit" class="group" hidden>
+        <div class="cell"><label class="cell-label" for="day-editor-start">Starts</label><input id="day-editor-start" type="time"></div>
+        <div class="cell"><label class="cell-label" for="day-editor-end">Ends</label><input id="day-editor-end" type="time"></div>
+        <div class="cell"><button type="button" id="day-editor-delete" class="btn destructive">Delete block</button></div>
+      </div>
+      <div class="day-editor-tools">
+        <button type="button" class="add" id="day-editor-add">Add block</button>
+        <button type="button" class="link quiet" id="day-editor-remove">Remove date</button>
+      </div>
+      <p id="day-editor-plan-problem" class="problem" role="alert" hidden></p>
+      <div class="actions">
+        <p id="day-editor-status" class="status" role="status"></p>
+        <button type="button" class="btn" id="day-editor-discard" hidden>Discard</button>
+        <button type="submit" form="plan-form" class="btn default" id="day-editor-save" disabled>Save</button>
+      </div>
+    </div>
+  </dialog>
 </body>
 </html>

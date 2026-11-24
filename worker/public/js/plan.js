@@ -2,15 +2,17 @@
 // follows the daily limit. Then how the day ends: one shutdown for every Mac, or each Mac's own.
 // Nothing is stored until Save is pressed, and a save that would shut Macs down or cover their
 // screens within the hour asks first.
-import { $, AuthError, api, app, el, formatDuration, handleFailure, minuteOfDay, dayKeyIn, onSignOut, tellMac } from "./core.js";
+import { $, AuthError, api, app, el, formatDuration, handleFailure, minuteOfDay, dayKeyIn, onSignOut, shiftDay, tellMac } from "./core.js";
+import { DAY_MINUTES, blockText, hhmm, minutes, plannedMs } from "./block-edit.js";
+import { initDayEditor, openDayEditor, refreshDayEditor } from "./day-editor.js";
 import { openDialog } from "./dialog.js";
+
+export { plannedMs };
 
 const OFF = { shutdown: "off", at: null, delay_minutes: 0, command: null };
 /** The past-the-limit pause until the account says otherwise. */
 const DEFAULT_OVERTIME = { enabled: false, every_minutes: 25, message: "You have crossed your limit. Try to wind down the work.", minutes: 5, rest: true };
-const MAX_BLOCKS = 8;
 const MAX_DATES = 60;
-const DAY_MINUTES = 1440;
 const SCRIPT_NAME = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,99}$/;
 /** A save that would shut down or cover this many minutes from now, or sooner, asks first. */
 const SOON_MINUTES = 60;
@@ -27,6 +29,8 @@ const ERRORS = {
 
 /** The plan, limit, and past-the-limit pause as last stored. */
 let saved = null;
+/** The blocks as edited, by date. A date with no blocks is not in it; that day follows the daily limit. */
+const draft = new Map();
 let busy = false;
 /** The account's Macs, as the device list last fetched them, and the row each has under "each its own way". */
 let macs = [];
@@ -34,11 +38,19 @@ const macRows = new Map();
 
 onSignOut(() => {
   saved = null;
+  draft.clear();
   macs = [];
   macRows.clear();
   $("plan-each").replaceChildren();
-  $("plan-status").textContent = "";
+  $("plan-dates").replaceChildren();
+  setStatus("");
 });
+
+/** The page's status line, and its copy in the day editor. */
+function setStatus(text) {
+  $("plan-status").textContent = text;
+  $("day-editor-status").textContent = text;
+}
 
 // ---- The plan's rules, shared with Today ----
 
@@ -49,8 +61,6 @@ export function blocksOn(plan, key) {
   return plan.dates.find((entry) => entry.day === key)?.blocks ?? [];
 }
 
-export const plannedMs = (blocks) => blocks.reduce((sum, [start, end]) => sum + (end - start) * 60_000, 0);
-
 /** The plan as the server sent it with the settings; the server fills in its default until one is saved. */
 export function currentPlan() {
   return app.settings.day_plan;
@@ -58,24 +68,6 @@ export function currentPlan() {
 
 /** "Tue, 1 Dec" for a "YYYY-MM-DD" day, the same on every clock. */
 const dateText = (key) => new Date(`${key}T12:00:00Z`).toLocaleDateString([], { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
-
-function nextDay(key) {
-  const date = new Date(`${key}T12:00:00Z`);
-  date.setUTCDate(date.getUTCDate() + 1);
-  return date.toISOString().slice(0, 10);
-}
-
-const hhmm = (minute) => `${String(Math.floor(minute / 60)).padStart(2, "0")}:${String(minute % 60).padStart(2, "0")}`;
-const endText = (minute) => (minute === DAY_MINUTES ? "midnight" : hhmm(minute));
-const blockText = ([start, end]) => `${hhmm(start)}–${endText(end)}`;
-
-/** "HH:MM" as minutes. An end of 00:00 is midnight at the end of the day. */
-function minutes(text, isEnd) {
-  if (!/^\d{2}:\d{2}$/.test(text)) return null;
-  const [hours, mins] = text.split(":").map(Number);
-  const value = hours * 60 + mins;
-  return isEnd && value === 0 ? DAY_MINUTES : value;
-}
 
 /** The plan's fields in the order `read` builds them, so the two compare as text. */
 function normalize(p) {
@@ -108,121 +100,43 @@ function coversNow(plan, key) {
   return !blocks.some(([start, end]) => start <= now && now < end);
 }
 
-// ---- The block lists ----
+// ---- The dates ----
+// The day editor (day-editor.js) changes one date's blocks; the group shows one row per date.
 
-function blockRow([start, end]) {
-  const item = el("li", "block");
-  const from = el("input");
-  from.type = "time";
-  from.value = hhmm(start);
-  from.setAttribute("aria-label", "Starts");
-  const to = el("input");
-  to.type = "time";
-  to.value = hhmm(end % DAY_MINUTES);
-  to.setAttribute("aria-label", "Ends");
-  const remove = el("button", "minus", "−");
-  remove.type = "button";
-  remove.setAttribute("aria-label", "Remove block");
-  remove.addEventListener("click", () => {
-    item.remove();
-    showParts();
-  });
-  item.append(remove, from, el("span", "", "to"), to);
-  return item;
-}
+const draftBlocks = (day) => draft.get(day) ?? [];
 
-function setBlocks(list, blocks) {
-  list.replaceChildren(...blocks.map(blockRow));
-}
-
-function addBlock(list, label) {
-  if (list.children.length >= MAX_BLOCKS) return;
-  const read = readBlocks(list, label);
-  const last = read.ok && read.blocks.length ? read.blocks[read.blocks.length - 1][1] : null;
-  const start = last === null ? 9 * 60 : Math.min(last + 60, DAY_MINUTES - 60);
-  list.append(blockRow([start, Math.min(start + 120, DAY_MINUTES)]));
-  list.lastElementChild.querySelector("input").focus();
+function setDraftBlocks(day, blocks) {
+  if (blocks.length) draft.set(day, blocks);
+  else draft.delete(day);
   showParts();
 }
 
-/** One list's blocks, in order, or a message naming the date (`label`) and what to fix. */
-function readBlocks(list, label) {
-  const blocks = [];
-  for (const item of list.children) {
-    const [from, to] = item.querySelectorAll("input");
-    const start = minutes(from.value, false);
-    const end = minutes(to.value, true);
-    if (start === null || end === null) return { ok: false, message: `Enter both times for each block on ${label}.` };
-    if (start >= end) return { ok: false, message: `A block on ${label} ends before it starts (${from.value}–${to.value}).` };
-    blocks.push([start, end]);
-  }
-  blocks.sort((a, b) => a[0] - b[0]);
-  for (let i = 1; i < blocks.length; i++) {
-    if (blocks[i][0] < blocks[i - 1][1]) return { ok: false, message: `Two blocks on ${label} overlap: ${blockText(blocks[i - 1])} and ${blockText(blocks[i])}.` };
-  }
-  return { ok: true, blocks };
+/** The edited dates, soonest first. */
+const draftDates = () => [...draft.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([day, blocks]) => ({ day, blocks }));
+
+/** One row per date: the date, then its blocks. Pressing it opens the day editor on that date. */
+function renderDates() {
+  $("plan-dates").replaceChildren(...draftDates().map(({ day, blocks }) => {
+    const row = el("button", "cell date-row");
+    row.type = "button";
+    row.append(el("span", "cell-label", dateText(day)), el("span", "value", blocks.map(blockText).join(", ")));
+    row.addEventListener("click", () => openDayEditor(day));
+    return row;
+  }));
 }
 
-// ---- The dates ----
-
-/** One date with its blocks: the date, "Remove date", the block list, and "Add block". */
-function dateRow(day, blocks) {
-  const item = el("div", "cell stacked");
-  const date = el("input");
-  date.type = "date";
-  date.value = day;
-  date.setAttribute("aria-label", "Date");
-  const remove = el("button", "btn", "Remove date");
-  remove.type = "button";
-  remove.addEventListener("click", () => {
-    item.remove();
-    showParts();
-  });
-  const head = el("div", "cell-row");
-  head.append(date, remove);
-  const list = el("ol", "blocks");
-  setBlocks(list, blocks);
-  const add = el("button", "add", "Add block");
-  add.type = "button";
-  add.addEventListener("click", () => addBlock(list, dateText(date.value || todayKey())));
-  item.append(head, list, add);
-  return item;
-}
-
-const dateRows = () => [...$("plan-dates").children];
-const rowDay = (row) => row.querySelector('input[type="date"]').value;
-
-function setDates(dates) {
-  $("plan-dates").replaceChildren(...dates.map(({ day, blocks }) => dateRow(day, blocks)));
-}
-
-/** A new date opens on today, or the day after the last one entered, with one block to start from. */
+/** A new date opens on today, or the next day without blocks, in the day editor. */
 function addDate() {
-  if (dateRows().length >= MAX_DATES) return;
-  const days = new Set(dateRows().map(rowDay));
+  if (draft.size >= MAX_DATES) return;
   let day = todayKey();
-  while (days.has(day)) day = nextDay(day);
-  const row = dateRow(day, []);
-  const after = dateRows().find((other) => rowDay(other) > day) ?? null;
-  $("plan-dates").insertBefore(row, after);
-  addBlock(row.querySelector("ol"), dateText(day));
+  while (draft.has(day)) day = shiftDay(day, 1);
+  openDayEditor(day);
 }
 
 /** The dates as the server stores them, soonest first, or a message saying what to fix. */
 function readDates() {
-  const dates = [];
-  for (const row of dateRows()) {
-    const day = rowDay(row);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return { ok: false, message: "Enter each date." };
-    const label = dateText(day);
-    if (dates.some((entry) => entry.day === day)) return { ok: false, message: `${label} is entered twice.` };
-    const result = readBlocks(row.querySelector("ol"), label);
-    if (!result.ok) return result;
-    if (result.blocks.length === 0) return { ok: false, message: `Add a block on ${label}, or remove the date.` };
-    dates.push({ day, blocks: result.blocks });
-  }
-  dates.sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0));
-  return { ok: true, dates };
+  if (draft.size > MAX_DATES) return { ok: false, message: ERRORS.too_many_dates };
+  return { ok: true, dates: draftDates() };
 }
 
 // ---- The form ----
@@ -333,7 +247,8 @@ function fill() {
   } else {
     $("limit-hours").value = $("limit-minutes").value = "";
   }
-  setDates(plan.dates);
+  draft.clear();
+  for (const { day, blocks } of plan.dates) draft.set(day, blocks);
   $("plan-outside").value = plan.outside;
   $("plan-scope").value = plan.scope;
   fillShutdown({ when: $("plan-shutdown"), at: $("plan-at"), delay: $("plan-delay"), command: $("plan-command") }, plan);
@@ -454,17 +369,21 @@ function showParts() {
     row.rows.delay.hidden = own !== "plan_end";
     row.rows.script.hidden = own === "off";
   }
-  for (const row of dateRows()) row.querySelector(".add").disabled = row.querySelector("ol").children.length >= MAX_BLOCKS;
-  $("date-add").disabled = dateRows().length >= MAX_DATES;
+  renderDates();
+  $("date-add").disabled = draft.size >= MAX_DATES;
   const result = read();
   labelPlanEnd(result.ok ? result.plan : null, key, $("plan-shutdown"));
   for (const row of macRows.values()) labelPlanEnd(result.ok ? result.plan : null, key, row.fields.when);
   // Only a problem with what is entered is spelled out; the form itself says what the plan does.
-  $("plan-problem").textContent = result.ok ? "" : result.message;
-  $("plan-problem").hidden = result.ok;
+  // The day editor carries the same problem, Save and Discard as the page.
   const changed = saved !== null && edited();
-  $("plan-save").disabled = busy || !changed;
-  $("plan-discard").hidden = !changed;
+  for (const [problem, saveButton, discard] of [["plan-problem", "plan-save", "plan-discard"], ["day-editor-plan-problem", "day-editor-save", "day-editor-discard"]]) {
+    $(problem).textContent = result.ok ? "" : result.message;
+    $(problem).hidden = result.ok;
+    $(saveButton).disabled = busy || !changed;
+    $(discard).hidden = !changed;
+  }
+  refreshDayEditor();
 }
 
 /** What saving would set off within the hour, in words. Empty when nothing soon. */
@@ -509,10 +428,9 @@ async function soonWarnings(plan, limitMs, key) {
 
 async function save(event) {
   event.preventDefault();
-  const status = $("plan-status");
   const result = read();
   if (!result.ok) {
-    status.textContent = result.message;
+    setStatus(result.message);
     return;
   }
   const key = todayKey();
@@ -521,7 +439,7 @@ async function save(event) {
   try {
     const warnings = await soonWarnings(result.plan, result.limitMs, key);
     if (warnings.length && !(await openDialog({ title: "Save this plan?", body: warnings, confirmLabel: "Save", danger: true }))) return;
-    status.textContent = "Saving…";
+    setStatus("Saving…");
     const body = { plan: result.plan, overtime: result.overtime };
     if (result.limitMs !== null) body.limit_ms = result.limitMs;
     const answer = await api("/v1/day-plan", { method: "PUT", body });
@@ -531,11 +449,11 @@ async function save(event) {
     app.settings.overtime = answer.overtime;
     saved = { plan: normalize(answer.day_plan), limitMs: answer.limit_ms, overtime: answer.overtime };
     fill();
-    status.textContent = "Saved";
+    setStatus("Saved");
     tellMac("saved");
   } catch (error) {
     if (error instanceof AuthError) return handleFailure(error);
-    status.textContent = ERRORS[error.message] ?? `Could not save (${error.message}).`;
+    setStatus(ERRORS[error.message] ?? `Could not save (${error.message}).`);
   } finally {
     busy = false;
     showParts();
@@ -551,8 +469,14 @@ export function renderPlan() {
     fill();
   } else if (keyOf(next.plan, next.limitMs, next.overtime) !== keyOf(saved.plan, saved.limitMs, saved.overtime)) {
     saved = next;
-    $("plan-status").textContent = "The plan was changed elsewhere. Saving replaces that with what is here.";
+    setStatus("The plan was changed elsewhere. Saving replaces that with what is here.");
   }
+  showParts();
+}
+
+function discard() {
+  fill();
+  setStatus("");
   showParts();
 }
 
@@ -562,9 +486,6 @@ export function initPlan() {
   form.addEventListener("input", showParts);
   form.addEventListener("change", showParts);
   $("date-add").addEventListener("click", addDate);
-  $("plan-discard").addEventListener("click", () => {
-    fill();
-    $("plan-status").textContent = "";
-    showParts();
-  });
+  $("plan-discard").addEventListener("click", discard);
+  initDayEditor({ blocksOn: draftBlocks, setBlocks: setDraftBlocks, todayKey, dateText, discard });
 }
