@@ -1,36 +1,32 @@
-// "Your day": the account's one plan for all its Macs. A daily limit, or time blocks for weekdays and
-// weekends that today can replace, and how the day ends: one shutdown for every Mac, or each Mac's
-// own. Nothing is stored until Save is pressed, and a save that would shut Macs down or cover their
+// "Your day": the account's one plan for all its Macs. Time blocks on chosen dates; every other day
+// follows the daily limit. Then how the day ends: one shutdown for every Mac, or each Mac's own.
+// Nothing is stored until Save is pressed, and a save that would shut Macs down or cover their
 // screens within the hour asks first.
 import { $, AuthError, api, app, el, formatDuration, handleFailure, minuteOfDay, dayKeyIn, onSignOut, tellMac } from "./core.js";
 import { openDialog } from "./dialog.js";
 
-const DEFAULT_PLAN = { mode: "limit", weekdays: [], weekends: [], today: null, outside: "pause", shutdown: "off", at: null, delay_minutes: 0, command: null, scope: "all", each: {} };
 const OFF = { shutdown: "off", at: null, delay_minutes: 0, command: null };
 /** The past-the-limit pause until the account says otherwise. */
 const DEFAULT_OVERTIME = { enabled: false, every_minutes: 25, message: "You have crossed your limit. Try to wind down the work.", minutes: 5, rest: true };
 const MAX_BLOCKS = 8;
+const MAX_DATES = 60;
 const DAY_MINUTES = 1440;
 const SCRIPT_NAME = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,99}$/;
 /** A save that would shut down or cover this many minutes from now, or sooner, asks first. */
 const SOON_MINUTES = 60;
 const CHECK_IN = "within 5 minutes";
-const LISTS = ["weekdays", "weekends", "today"];
-const SHUTDOWNS = {
-  limit: [["off", "Off"], ["time", "At a set time"], ["limit", "After the daily limit"]],
-  planner: [["off", "Off"], ["last_block", "When the last block ends"], ["time", "At a set time"]],
-};
+const PLAN_END_LABEL = "After the last block or the daily limit";
+const SHUTDOWNS = [["off", "Off"], ["plan_end", PLAN_END_LABEL], ["time", "At a set time"]];
 
 const ERRORS = {
   bad_plan: "The plan did not pass the server's checks. Check the blocks, the times, and the script name.",
+  too_many_dates: "Too many dates.",
   bad_limit: "Enter a limit between 0 and 24 hours.",
   bad_overtime: "The reminder needs a message, 1 to 180 minutes, and a gap of 1 to 240 minutes.",
 };
 
-/** The plan, limit, and past-the-limit pause as last stored, with a stale "today only" left out. */
+/** The plan, limit, and past-the-limit pause as last stored. */
 let saved = null;
-/** The form holds blocks for today only. */
-let todayOwn = false;
 let busy = false;
 /** The account's Macs, as the device list last fetched them, and the row each has under "each its own way". */
 let macs = [];
@@ -48,20 +44,25 @@ onSignOut(() => {
 
 export const todayKey = () => dayKeyIn(app.settings.timezone);
 
-export function isWeekend(key) {
-  const day = new Date(`${key}T12:00:00Z`).getUTCDay();
-  return day === 0 || day === 6;
-}
-
+/** The blocks of a block date, or none: that day follows the daily limit. */
 export function blocksOn(plan, key) {
-  if (plan.today?.day === key) return plan.today.blocks;
-  return isWeekend(key) ? plan.weekends : plan.weekdays;
+  return plan.dates.find((entry) => entry.day === key)?.blocks ?? [];
 }
 
 export const plannedMs = (blocks) => blocks.reduce((sum, [start, end]) => sum + (end - start) * 60_000, 0);
 
+/** The plan as the server sent it with the settings; the server fills in its default until one is saved. */
 export function currentPlan() {
-  return app.settings?.day_plan ?? DEFAULT_PLAN;
+  return app.settings.day_plan;
+}
+
+/** "Tue, 1 Dec" for a "YYYY-MM-DD" day, the same on every clock. */
+const dateText = (key) => new Date(`${key}T12:00:00Z`).toLocaleDateString([], { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
+
+function nextDay(key) {
+  const date = new Date(`${key}T12:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + 1);
+  return date.toISOString().slice(0, 10);
 }
 
 const hhmm = (minute) => `${String(Math.floor(minute / 60)).padStart(2, "0")}:${String(minute % 60).padStart(2, "0")}`;
@@ -76,13 +77,11 @@ function minutes(text, isEnd) {
   return isEnd && value === 0 ? DAY_MINUTES : value;
 }
 
-function normalize(plan, key) {
-  const p = { ...DEFAULT_PLAN, ...plan };
+/** The plan's fields in the order `read` builds them, so the two compare as text. */
+function normalize(p) {
   return {
-    mode: p.mode, weekdays: p.weekdays, weekends: p.weekends,
-    today: p.today?.day === key ? p.today : null,
-    outside: p.outside, shutdown: p.shutdown, at: p.at, delay_minutes: p.delay_minutes, command: p.command,
-    scope: p.scope, each: p.each ?? {},
+    dates: p.dates, outside: p.outside, shutdown: p.shutdown, at: p.at, delay_minutes: p.delay_minutes, command: p.command,
+    scope: p.scope, each: p.each,
   };
 }
 
@@ -96,15 +95,17 @@ function shutdownOf(plan, deviceId) {
 function shutdownMinute(plan, key, deviceId) {
   const own = shutdownOf(plan, deviceId);
   if (own.shutdown === "time") return own.at;
-  if (own.shutdown !== "last_block") return null;
+  if (own.shutdown !== "plan_end") return null;
   const blocks = blocksOn(plan, key);
   return blocks.length ? Math.min(blocks[blocks.length - 1][1], DAY_MINUTES - 1) : null;
 }
 
+/** On a block date with "Cover the screen", outside the blocks covers. Other days follow the limit. */
 function coversNow(plan, key) {
-  if (plan.mode !== "planner" || plan.outside !== "pause") return false;
+  const blocks = blocksOn(plan, key);
+  if (plan.outside !== "pause" || blocks.length === 0) return false;
   const now = minuteOfDay();
-  return !blocksOn(plan, key).some(([start, end]) => start <= now && now < end);
+  return !blocks.some(([start, end]) => start <= now && now < end);
 }
 
 // ---- The block lists ----
@@ -130,14 +131,13 @@ function blockRow([start, end]) {
   return item;
 }
 
-function setBlocks(name, blocks) {
-  $(`blocks-${name}`).replaceChildren(...blocks.map(blockRow));
+function setBlocks(list, blocks) {
+  list.replaceChildren(...blocks.map(blockRow));
 }
 
-function addBlock(name) {
-  const list = $(`blocks-${name}`);
+function addBlock(list, label) {
   if (list.children.length >= MAX_BLOCKS) return;
-  const read = readBlocks(name);
+  const read = readBlocks(list, label);
   const last = read.ok && read.blocks.length ? read.blocks[read.blocks.length - 1][1] : null;
   const start = last === null ? 9 * 60 : Math.min(last + 60, DAY_MINUTES - 60);
   list.append(blockRow([start, Math.min(start + 120, DAY_MINUTES)]));
@@ -145,54 +145,107 @@ function addBlock(name) {
   showParts();
 }
 
-const LIST_NAMES = { weekdays: "weekday", weekends: "weekend", today: "today's" };
-
-function readBlocks(name) {
+/** One list's blocks, in order, or a message naming the date (`label`) and what to fix. */
+function readBlocks(list, label) {
   const blocks = [];
-  for (const item of $(`blocks-${name}`).children) {
+  for (const item of list.children) {
     const [from, to] = item.querySelectorAll("input");
     const start = minutes(from.value, false);
     const end = minutes(to.value, true);
-    if (start === null || end === null) return { ok: false, message: `Enter both times for each ${LIST_NAMES[name]} block.` };
-    if (start >= end) return { ok: false, message: `A ${LIST_NAMES[name]} block ends before it starts (${from.value}–${to.value}).` };
+    if (start === null || end === null) return { ok: false, message: `Enter both times for each block on ${label}.` };
+    if (start >= end) return { ok: false, message: `A block on ${label} ends before it starts (${from.value}–${to.value}).` };
     blocks.push([start, end]);
   }
   blocks.sort((a, b) => a[0] - b[0]);
   for (let i = 1; i < blocks.length; i++) {
-    if (blocks[i][0] < blocks[i - 1][1]) return { ok: false, message: `Two ${LIST_NAMES[name]} blocks overlap: ${blockText(blocks[i - 1])} and ${blockText(blocks[i])}.` };
+    if (blocks[i][0] < blocks[i - 1][1]) return { ok: false, message: `Two blocks on ${label} overlap: ${blockText(blocks[i - 1])} and ${blockText(blocks[i])}.` };
   }
   return { ok: true, blocks };
 }
 
+// ---- The dates ----
+
+/** One date with its blocks: the date, "Remove date", the block list, and "Add block". */
+function dateRow(day, blocks) {
+  const item = el("div", "cell stacked");
+  const date = el("input");
+  date.type = "date";
+  date.value = day;
+  date.setAttribute("aria-label", "Date");
+  const remove = el("button", "btn", "Remove date");
+  remove.type = "button";
+  remove.addEventListener("click", () => {
+    item.remove();
+    showParts();
+  });
+  const head = el("div", "cell-row");
+  head.append(date, remove);
+  const list = el("ol", "blocks");
+  setBlocks(list, blocks);
+  const add = el("button", "add", "Add block");
+  add.type = "button";
+  add.addEventListener("click", () => addBlock(list, dateText(date.value || todayKey())));
+  item.append(head, list, add);
+  return item;
+}
+
+const dateRows = () => [...$("plan-dates").children];
+const rowDay = (row) => row.querySelector('input[type="date"]').value;
+
+function setDates(dates) {
+  $("plan-dates").replaceChildren(...dates.map(({ day, blocks }) => dateRow(day, blocks)));
+}
+
+/** A new date opens on today, or the day after the last one entered, with one block to start from. */
+function addDate() {
+  if (dateRows().length >= MAX_DATES) return;
+  const days = new Set(dateRows().map(rowDay));
+  let day = todayKey();
+  while (days.has(day)) day = nextDay(day);
+  const row = dateRow(day, []);
+  const after = dateRows().find((other) => rowDay(other) > day) ?? null;
+  $("plan-dates").insertBefore(row, after);
+  addBlock(row.querySelector("ol"), dateText(day));
+}
+
+/** The dates as the server stores them, soonest first, or a message saying what to fix. */
+function readDates() {
+  const dates = [];
+  for (const row of dateRows()) {
+    const day = rowDay(row);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return { ok: false, message: "Enter each date." };
+    const label = dateText(day);
+    if (dates.some((entry) => entry.day === day)) return { ok: false, message: `${label} is entered twice.` };
+    const result = readBlocks(row.querySelector("ol"), label);
+    if (!result.ok) return result;
+    if (result.blocks.length === 0) return { ok: false, message: `Add a block on ${label}, or remove the date.` };
+    dates.push({ day, blocks: result.blocks });
+  }
+  dates.sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0));
+  return { ok: true, dates };
+}
+
 // ---- The form ----
 
-const checked = (name) => document.querySelector(`input[name="${name}"]:checked`)?.value;
-
-/** The plan as the server stores it, plus the limit and the past-the-limit pause, or a message saying what to fix. */
+/**
+ * The plan as the server stores it, plus the limit and the past-the-limit pause, or a message saying
+ * what to fix. A blank limit keeps the stored one.
+ */
 function read() {
-  const key = todayKey();
-  const mode = checked("plan-mode") ?? "limit";
-  let limitMs = null;
-  let overtime = saved?.overtime ?? DEFAULT_OVERTIME;
-  if (mode === "limit") {
+  let limitMs = saved?.limitMs ?? null;
+  if ($("limit-hours").value !== "" || $("limit-minutes").value !== "") {
     const hours = Number($("limit-hours").value || 0);
     const mins = Number($("limit-minutes").value || 0);
-    if ($("limit-hours").value === "" && $("limit-minutes").value === "") return { ok: false, message: "Enter the daily limit." };
     if (!Number.isInteger(hours) || !Number.isInteger(mins) || hours < 0 || hours > 24 || mins < 0 || mins > 59 || hours * 60 + mins > DAY_MINUTES) {
       return { ok: false, message: "Enter whole hours (0–24) and minutes (0–59)." };
     }
     limitMs = (hours * 60 + mins) * 60_000;
-    const result = readOvertime(overtime);
-    if (!result.ok) return result;
-    overtime = result.overtime;
   }
-  const lists = {};
-  for (const name of LISTS) {
-    if (name === "today" && !todayOwn) continue;
-    const result = readBlocks(name);
-    if (!result.ok) return result;
-    lists[name] = result.blocks;
-  }
+  const overtimeResult = readOvertime(saved?.overtime ?? DEFAULT_OVERTIME);
+  if (!overtimeResult.ok) return overtimeResult;
+  const overtime = overtimeResult.overtime;
+  const datesResult = readDates();
+  if (!datesResult.ok) return datesResult;
   const scope = $("plan-scope").value;
   let own = OFF;
   const each = {};
@@ -201,11 +254,10 @@ function read() {
     if (!result.ok) return result;
     own = result.shutdown;
   } else {
-    // A Mac with no row (signed out, or gone) keeps its entry, so an old entry alone does not read as
-    // an edit; one the mode no longer allows is dropped, as it has no row to fix it in.
+    // A Mac with no row (signed out, or gone) keeps its entry, so an old entry alone does not read as an edit.
     const known = new Set(macs.map((mac) => mac.device_id));
     for (const [id, entry] of Object.entries(saved?.plan.each ?? {})) {
-      if (!known.has(id) && SHUTDOWNS[mode].some(([value]) => value === entry.shutdown)) each[id] = entry;
+      if (!known.has(id)) each[id] = entry;
     }
     for (const mac of macs) {
       const row = macRows.get(mac.device_id);
@@ -215,11 +267,7 @@ function read() {
       if (result.shutdown.shutdown !== "off") each[mac.device_id] = result.shutdown;
     }
   }
-  const plan = {
-    mode, weekdays: lists.weekdays, weekends: lists.weekends,
-    today: todayOwn ? { day: key, blocks: lists.today } : null,
-    outside: $("plan-outside").value, ...own, scope, each,
-  };
+  const plan = { dates: datesResult.dates, outside: $("plan-outside").value, ...own, scope, each };
   return { ok: true, plan, limitMs, overtime };
 }
 
@@ -244,7 +292,7 @@ function readShutdown(fields, who) {
     if (at === null) return { ok: false, message: `${who}Enter the time to shut down.` };
   }
   let delay = 0;
-  if (shutdown === "limit") {
+  if (shutdown === "plan_end") {
     delay = Number(fields.delay.value || 0);
     if (!Number.isInteger(delay) || delay < 0 || delay > 720) return { ok: false, message: `${who}Wait 0 to 720 whole minutes.` };
   }
@@ -261,8 +309,8 @@ function readShutdown(fields, who) {
 /** Entries per Mac compare by device id, whatever order they came in. */
 const keyOf = (plan, limitMs, overtime) => JSON.stringify([
   { ...plan, each: Object.fromEntries(Object.entries(plan.each ?? {}).sort()) },
-  plan.mode === "limit" ? limitMs : null,
-  plan.mode === "limit" ? overtimeKey(overtime) : null,
+  limitMs,
+  overtimeKey(overtime),
 ]);
 const overtimeKey = (o) => [o.enabled, o.every_minutes, o.message, o.minutes, o.rest];
 
@@ -278,7 +326,6 @@ function fill() {
   $("overtime-message").value = overtime.message;
   $("overtime-minutes").value = String(overtime.minutes);
   $("overtime-rest").checked = overtime.rest;
-  $(`plan-mode-${plan.mode}`).checked = true;
   if (limitMs != null) {
     const total = Math.round(limitMs / 60_000);
     $("limit-hours").value = String(Math.floor(total / 60));
@@ -286,18 +333,15 @@ function fill() {
   } else {
     $("limit-hours").value = $("limit-minutes").value = "";
   }
-  setBlocks("weekdays", plan.weekdays);
-  setBlocks("weekends", plan.weekends);
-  todayOwn = plan.today !== null;
-  setBlocks("today", plan.today?.blocks ?? []);
+  setDates(plan.dates);
   $("plan-outside").value = plan.outside;
   $("plan-scope").value = plan.scope;
-  fillShutdown({ when: $("plan-shutdown"), at: $("plan-at"), delay: $("plan-delay"), command: $("plan-command") }, plan, plan.mode);
-  for (const [id, row] of macRows) fillShutdown(row.fields, plan.each[id] ?? OFF, plan.mode);
+  fillShutdown({ when: $("plan-shutdown"), at: $("plan-at"), delay: $("plan-delay"), command: $("plan-command") }, plan);
+  for (const [id, row] of macRows) fillShutdown(row.fields, plan.each[id] ?? OFF);
 }
 
-function fillShutdown(fields, own, mode) {
-  setShutdownOptions(mode, fields.when);
+function fillShutdown(fields, own) {
+  setShutdownOptions(fields.when);
   fields.when.value = own.shutdown;
   fields.at.value = hhmm(own.at ?? 22 * 60);
   fields.delay.value = String(own.delay_minutes);
@@ -319,8 +363,7 @@ export function setPlanDevices(info) {
     if (!row) {
       row = macRow(mac.device_id);
       macRows.set(mac.device_id, row);
-      const mode = checked("plan-mode") ?? "limit";
-      fillShutdown(row.fields, saved?.plan.each[mac.device_id] ?? OFF, mode);
+      fillShutdown(row.fields, saved?.plan.each[mac.device_id] ?? OFF);
     }
     row.name.textContent = mac.display_name;
     row.mine.hidden = mac.device_id !== thisMac;
@@ -374,62 +417,49 @@ function macRow(deviceId) {
   return { item, name, mine, rows, fields: { when, at, delay, command } };
 }
 
-/** The shutdown choices that belong to a mode. One that does not carry over becomes "Off". */
-function setShutdownOptions(mode, select = $("plan-shutdown")) {
-  if (select.dataset.mode === mode) return;
-  const before = select.value;
-  select.dataset.mode = mode;
-  select.replaceChildren(...SHUTDOWNS[mode].map(([value, label]) => {
+/** The shutdown choices, filled in once per list. */
+function setShutdownOptions(select) {
+  if (select.options.length) return;
+  select.replaceChildren(...SHUTDOWNS.map(([value, label]) => {
     const option = el("option", "", label);
     option.value = value;
     return option;
   }));
-  select.value = SHUTDOWNS[mode].some(([value]) => value === before) ? before : "off";
 }
 
-/** The last-block choice says when that is today, so the shutdown time is plain without a note. */
-function labelLastBlock(plan, key, select) {
-  const option = [...select.options].find((entry) => entry.value === "last_block");
+/** The choice that follows the day says what that is today, so the shutdown time is plain without a note. */
+function labelPlanEnd(plan, key, select) {
+  const option = [...select.options].find((entry) => entry.value === "plan_end");
   if (!option) return;
-  const at = plan ? shutdownMinute({ ...plan, scope: "all", shutdown: "last_block" }, key) : null;
-  option.textContent = plan && at === null ? "When the last block ends (none today)"
-    : at === null ? "When the last block ends" : `When the last block ends (${hhmm(at)} today)`;
+  const at = plan ? shutdownMinute({ ...plan, scope: "all", shutdown: "plan_end" }, key) : null;
+  option.textContent = plan && at === null ? `${PLAN_END_LABEL} (the limit today)`
+    : at === null ? PLAN_END_LABEL : `${PLAN_END_LABEL} (${hhmm(at)} today)`;
 }
 
 function showParts() {
-  const mode = checked("plan-mode") ?? "limit";
   const key = todayKey();
-  $("plan-limit").hidden = mode !== "limit";
-  $("plan-planner").hidden = mode !== "planner";
-  $("plan-over").hidden = mode !== "limit";
   $("plan-over-detail").hidden = !$("overtime-enabled").checked;
   const scope = $("plan-scope").value;
   $("plan-shared").hidden = scope !== "all";
   $("plan-each").hidden = scope !== "each";
   $("plan-each-empty").hidden = scope !== "each" || macs.length > 0;
-  setShutdownOptions(mode);
+  setShutdownOptions($("plan-shutdown"));
   const shutdown = $("plan-shutdown").value;
   $("plan-at-row").hidden = shutdown !== "time";
-  $("plan-delay-row").hidden = shutdown !== "limit";
+  $("plan-delay-row").hidden = shutdown !== "plan_end";
   $("plan-script-row").hidden = shutdown === "off";
   for (const row of macRows.values()) {
-    setShutdownOptions(mode, row.fields.when);
+    setShutdownOptions(row.fields.when);
     const own = row.fields.when.value;
     row.rows.at.hidden = own !== "time";
-    row.rows.delay.hidden = own !== "limit";
+    row.rows.delay.hidden = own !== "plan_end";
     row.rows.script.hidden = own === "off";
   }
-  $("blocks-today").hidden = $("today-add").hidden = $("today-reset").hidden = !todayOwn;
-  $("today-change").hidden = todayOwn;
-  for (const name of LISTS) {
-    const add = document.querySelector(`[data-add="${name}"]`);
-    if (add) add.disabled = $(`blocks-${name}`).children.length >= MAX_BLOCKS;
-  }
+  for (const row of dateRows()) row.querySelector(".add").disabled = row.querySelector("ol").children.length >= MAX_BLOCKS;
+  $("date-add").disabled = dateRows().length >= MAX_DATES;
   const result = read();
-  if (mode === "planner") {
-    labelLastBlock(result.ok ? result.plan : null, key, $("plan-shutdown"));
-    for (const row of macRows.values()) labelLastBlock(result.ok ? result.plan : null, key, row.fields.when);
-  }
+  labelPlanEnd(result.ok ? result.plan : null, key, $("plan-shutdown"));
+  for (const row of macRows.values()) labelPlanEnd(result.ok ? result.plan : null, key, row.fields.when);
   // Only a problem with what is entered is spelled out; the form itself says what the plan does.
   $("plan-problem").textContent = result.ok ? "" : result.message;
   $("plan-problem").hidden = result.ok;
@@ -454,10 +484,12 @@ async function soonWarnings(plan, limitMs, key) {
     const verb = plan.scope === "each" && names.length === 1 ? "shuts" : "shut";
     warnings.push(`${names.join(", ")} ${verb} down today at ${hhmm(at)}, in ${formatDuration((at - minuteOfDay()) * 60_000)}. Each warns for 60 seconds first, with Cancel.`);
   }
-  const afterLimit = who.filter((mac) => {
+  // After the limit applies only on a day without blocks.
+  const byLimit = (p, own) => own.shutdown === "plan_end" && blocksOn(p, key).length === 0;
+  const afterLimit = limitMs === null ? [] : who.filter((mac) => {
     const own = shutdownOf(plan, mac.id);
     const before = shutdownOf(saved.plan, mac.id);
-    return own.shutdown === "limit" && (before.shutdown !== "limit" || saved.limitMs !== limitMs || before.delay_minutes !== own.delay_minutes);
+    return byLimit(plan, own) && (!byLimit(saved.plan, before) || saved.limitMs !== limitMs || before.delay_minutes !== own.delay_minutes);
   });
   if (afterLimit.length) {
     const detail = await api(`/v1/days/${key}`);
@@ -491,17 +523,14 @@ async function save(event) {
     const warnings = await soonWarnings(result.plan, result.limitMs, key);
     if (warnings.length && !(await openDialog({ title: "Save this plan?", body: warnings, confirmLabel: "Save", danger: true }))) return;
     status.textContent = "Saving…";
-    const body = { plan: result.plan };
-    if (result.plan.mode === "limit") {
-      body.limit_ms = result.limitMs;
-      body.overtime = result.overtime;
-    }
+    const body = { plan: result.plan, overtime: result.overtime };
+    if (result.limitMs !== null) body.limit_ms = result.limitMs;
     const answer = await api("/v1/day-plan", { method: "PUT", body });
     app.settings.day_plan = answer.day_plan;
     app.settings.day_plan_updated_at_ms = answer.day_plan_updated_at_ms;
     app.settings.limit_ms = answer.limit_ms;
     app.settings.overtime = answer.overtime;
-    saved = { plan: normalize(answer.day_plan, key), limitMs: answer.limit_ms, overtime: answer.overtime };
+    saved = { plan: normalize(answer.day_plan), limitMs: answer.limit_ms, overtime: answer.overtime };
     fill();
     status.textContent = "Saved";
     tellMac("saved");
@@ -517,8 +546,7 @@ async function save(event) {
 /** Brings the panel up to date without touching an edit in progress. */
 export function renderPlan() {
   if (!app.settings || busy) return;
-  const key = todayKey();
-  const next = { plan: normalize(currentPlan(), key), limitMs: app.settings.limit_ms, overtime: app.settings.overtime ?? DEFAULT_OVERTIME };
+  const next = { plan: normalize(currentPlan()), limitMs: app.settings.limit_ms, overtime: app.settings.overtime ?? DEFAULT_OVERTIME };
   if (saved === null || !edited()) {
     saved = next;
     fill();
@@ -534,20 +562,7 @@ export function initPlan() {
   form.addEventListener("submit", save);
   form.addEventListener("input", showParts);
   form.addEventListener("change", showParts);
-  for (const button of form.querySelectorAll("[data-add]")) {
-    button.addEventListener("click", () => addBlock(button.dataset.add));
-  }
-  $("today-change").addEventListener("click", () => {
-    todayOwn = true;
-    const plan = read().plan ?? saved.plan;
-    setBlocks("today", isWeekend(todayKey()) ? plan.weekends ?? [] : plan.weekdays ?? []);
-    showParts();
-  });
-  $("today-reset").addEventListener("click", () => {
-    todayOwn = false;
-    setBlocks("today", []);
-    showParts();
-  });
+  $("date-add").addEventListener("click", addDate);
   $("plan-discard").addEventListener("click", () => {
     fill();
     $("plan-status").textContent = "";

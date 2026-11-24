@@ -8,48 +8,46 @@ final class AccountPlanTests: XCTestCase {
         try? JSONDecoder().decode(AccountPlan.self, from: Data(json.utf8))
     }
 
+    private func dated(_ blocks: [[Int]], on day: String = "2026-10-26") -> [AccountPlan.DatedBlocks] {
+        [AccountPlan.DatedBlocks(day: day, blocks: blocks)]
+    }
+
     private var planner: AccountPlan {
-        AccountPlan(mode: .planner, weekdays: workday, weekends: [[600, 660]], shutdown: .lastBlock)
+        AccountPlan(dates: dated(workday), shutdown: .planEnd)
     }
 
     func testReadsTheServersShape() {
-        let json = #"{"mode":"planner","weekdays":[[540,720],[780,1080]],"weekends":[[600,660]],"today":{"day":"2026-10-26","blocks":[[600,900]]},"outside":"pause","shutdown":"last_block","at":null,"delay_minutes":0,"command":"cal"}"#
+        let json = #"{"dates":[{"day":"2026-10-26","blocks":[[540,720],[780,1080]]},{"day":"2026-10-31","blocks":[[600,660]]}],"outside":"pause","shutdown":"plan_end","at":null,"delay_minutes":0,"command":"cal"}"#
         let plan = decode(json)
-        XCTAssertEqual(plan?.mode, .planner)
-        XCTAssertEqual(plan?.weekdays, workday)
-        XCTAssertEqual(plan?.today, AccountPlan.Today(day: "2026-10-26", blocks: [[600, 900]]))
-        XCTAssertEqual(plan?.shutdown, .lastBlock)
+        XCTAssertEqual(plan?.dates.map(\.day), ["2026-10-26", "2026-10-31"])
+        XCTAssertEqual(plan?.dates.first?.blocks, workday)
+        XCTAssertEqual(plan?.shutdown, .planEnd)
         XCTAssertEqual(plan?.command, "cal")
-        XCTAssertNil(decode(#"{"mode":"tasks"}"#))
+        XCTAssertNil(decode(#"{"mode":"limit"}"#), "the old shape is no plan")
     }
 
     func testPlanIsCheckedAgainOnTheMac() {
         XCTAssertTrue(validAccountPlan(planner))
-        XCTAssertTrue(validAccountPlan(AccountPlan(shutdown: .limit, delayMinutes: 30)))
-        XCTAssertFalse(validAccountPlan(AccountPlan(weekdays: [[720, 540]])))
-        XCTAssertFalse(validAccountPlan(AccountPlan(weekdays: [[540, 720], [700, 800]])), "blocks do not overlap")
-        XCTAssertFalse(validAccountPlan(AccountPlan(weekdays: [[0, 1441]])))
-        XCTAssertFalse(validAccountPlan(AccountPlan(mode: .planner, shutdown: .limit)), "a limit shutdown needs limit mode")
-        XCTAssertFalse(validAccountPlan(AccountPlan(mode: .limit, shutdown: .lastBlock)), "the last block needs the planner")
+        XCTAssertTrue(validAccountPlan(AccountPlan(shutdown: .planEnd, delayMinutes: 30)))
+        XCTAssertFalse(validAccountPlan(AccountPlan(shutdown: .planEnd, delayMinutes: 721)))
+        XCTAssertFalse(validAccountPlan(AccountPlan(dates: dated([[720, 540]]))))
+        XCTAssertFalse(validAccountPlan(AccountPlan(dates: dated([[540, 720], [700, 800]]))), "blocks do not overlap")
+        XCTAssertFalse(validAccountPlan(AccountPlan(dates: dated([[0, 1441]]))))
+        XCTAssertFalse(validAccountPlan(AccountPlan(dates: dated([]))), "a date without blocks is not entered")
+        XCTAssertFalse(validAccountPlan(AccountPlan(dates: dated(workday, on: "26/10/2026"))))
+        XCTAssertFalse(validAccountPlan(AccountPlan(dates: dated(workday, on: "2026-10-27") + dated(workday))), "soonest first")
+        XCTAssertFalse(validAccountPlan(AccountPlan(dates: dated(workday) + dated(workday))), "no date twice")
         XCTAssertFalse(validAccountPlan(AccountPlan(shutdown: .time)), "a set time needs its time")
         XCTAssertFalse(validAccountPlan(AccountPlan(shutdown: .time, at: 600, command: "../x")))
     }
 
-    func testTodaysBlocksReplaceTheUsualOnes() {
-        var plan = planner
-        plan.today = AccountPlan.Today(day: "2026-10-26", blocks: [[600, 900]])
-        XCTAssertEqual(blocksFor(plan, day: "2026-10-26", weekend: false), [[600, 900]])
-        XCTAssertEqual(blocksFor(plan, day: "2026-10-27", weekend: false), workday)
-        XCTAssertEqual(blocksFor(plan, day: "2026-10-31", weekend: true), [[600, 660]])
-    }
-
     func testShutdownRuleFromThePlan() {
         XCTAssertEqual(planShutdownRule(planner, blocks: workday), ShutdownRule(when: .time, after: "18:00"))
-        XCTAssertNil(planShutdownRule(planner, blocks: []), "no blocks that day, no shutdown")
+        XCTAssertEqual(planShutdownRule(planner, blocks: []), ShutdownRule(when: .limit), "no blocks that day, after the limit")
         XCTAssertEqual(planShutdownRule(planner, blocks: [[1200, 1440]])?.after, "23:59")
         XCTAssertEqual(planShutdownRule(AccountPlan(shutdown: .time, at: 1290, command: "cal"), blocks: []),
                        ShutdownRule(when: .time, after: "21:30", command: "cal"))
-        XCTAssertEqual(planShutdownRule(AccountPlan(shutdown: .limit, delayMinutes: 30), blocks: []),
+        XCTAssertEqual(planShutdownRule(AccountPlan(shutdown: .planEnd, delayMinutes: 30), blocks: []),
                        ShutdownRule(when: .limit, delayMinutes: 30))
         XCTAssertNil(planShutdownRule(AccountPlan(), blocks: workday))
     }
@@ -57,7 +55,7 @@ final class AccountPlanTests: XCTestCase {
     func testEachMacCanHaveItsOwnShutdown() {
         let macA = "8b6c1c0e-3a1a-4e0a-9f1a-0c2b7a6d5e11"
         let macB = "1f0e2d3c-4b5a-4968-8776-655443322110"
-        let json = #"{"mode":"limit","weekdays":[],"weekends":[],"today":null,"outside":"pause","shutdown":"time","at":600,"delay_minutes":0,"command":null,"scope":"each","each":{"\#(macA)":{"shutdown":"time","at":1290,"delay_minutes":0,"command":"cal"},"\#(macB)":{"shutdown":"limit","at":null,"delay_minutes":30,"command":null}}}"#
+        let json = #"{"dates":[],"outside":"pause","shutdown":"time","at":600,"delay_minutes":0,"command":null,"scope":"each","each":{"\#(macA)":{"shutdown":"time","at":1290,"delay_minutes":0,"command":"cal"},"\#(macB)":{"shutdown":"plan_end","at":null,"delay_minutes":30,"command":null}}}"#
         guard let plan = decode(json) else { return XCTFail("a plan with entries per Mac decodes") }
         XCTAssertEqual(plan.scope, .each)
         XCTAssertTrue(validAccountPlan(plan))
@@ -70,12 +68,12 @@ final class AccountPlanTests: XCTestCase {
         shared.scope = .all
         XCTAssertEqual(planShutdownRule(shared, blocks: [], deviceId: macB)?.after, "10:00", "under all, every Mac follows the plan's own shutdown")
 
-        let old = decode(#"{"mode":"limit","shutdown":"time","at":600,"delay_minutes":0}"#)
+        let old = decode(#"{"dates":[],"shutdown":"time","at":600,"delay_minutes":0}"#)
         XCTAssertEqual(old?.scope, .all, "a plan from before scope is the same on every Mac")
         XCTAssertEqual(old?.each, [:])
 
         var bad = plan
-        bad.each[macA] = AccountPlan.MacShutdown(shutdown: .lastBlock)
+        bad.each[macA] = AccountPlan.MacShutdown(shutdown: .time)
         XCTAssertFalse(validAccountPlan(bad), "an entry follows the plan's own rules")
         bad.each[macA] = AccountPlan.MacShutdown(shutdown: .time, at: 600, command: "../x")
         XCTAssertFalse(validAccountPlan(bad))
@@ -87,14 +85,13 @@ final class AccountPlanTests: XCTestCase {
         XCTAssertFalse(plannerCovers(planner, blocks: workday, day: day, minute: 540), "a block starts on its minute")
         XCTAssertTrue(plannerCovers(planner, blocks: workday, day: day, minute: 720), "and ends on its last")
         XCTAssertTrue(plannerCovers(planner, blocks: workday, day: day, minute: 1200), "after the last block")
-        XCTAssertTrue(plannerCovers(planner, blocks: [], day: day, minute: 600), "a day without blocks stays covered")
+        XCTAssertFalse(plannerCovers(planner, blocks: [], day: day, minute: 600), "a day without blocks follows the limit")
     }
 
     func testNothingIsCoveredWhenTheGapsAreLeftAlone() {
         var plan = planner
         plan.outside = .none
         XCTAssertFalse(plannerCovers(plan, blocks: workday, day: "2026-10-26", minute: 480))
-        XCTAssertFalse(plannerCovers(AccountPlan(), blocks: workday, day: "2026-10-26", minute: 480), "limit mode never covers")
     }
 
     func testFifteenMoreMinutes() {

@@ -1,8 +1,8 @@
 /**
- * The account's plan for the day, one for every Mac. Either a daily limit (the limit itself stays
- * in `budget_version`, so past days keep theirs) or time blocks, one set for weekdays and one for
- * weekends, which today can replace. Times are minutes past local midnight on each Mac's own clock,
- * and a block is `[start, end]`, so the stored plan stays a few hundred bytes.
+ * The account's plan for the day, one for every Mac. Time blocks are set for chosen dates; every
+ * other day follows the daily limit (the limit itself stays in `budget_version`, so past days keep
+ * theirs). On a block date only the blocks count. Times are minutes past local midnight on each
+ * Mac's own clock, and a block is `[start, end]`, so the stored plan stays a few hundred bytes.
  *
  * `command` is only a script's file name: the Mac runs it from its own commands folder, so the
  * account can choose among scripts already on that Mac but cannot send it code.
@@ -12,22 +12,28 @@
  */
 export type Block = [number, number];
 
+/** One chosen date and its blocks. A date without blocks is not entered. */
+export interface DatedBlocks {
+  day: string;
+  blocks: Block[];
+}
+
 /** How and when a Mac shuts down: the plan's own, or one Mac's entry under `each`. */
 export interface MacShutdown {
-  /** "time" uses `at`; "limit" waits `delay_minutes` past the limit; "last_block" is when the last block ends. */
-  shutdown: "off" | "time" | "limit" | "last_block";
+  /**
+   * "time" uses `at`. "plan_end" follows the day: on a block date when the last block ends, on any
+   * other day `delay_minutes` past the limit.
+   */
+  shutdown: "off" | "time" | "plan_end";
   at: number | null;
   delay_minutes: number;
   command: string | null;
 }
 
 export interface DayPlan extends MacShutdown {
-  mode: "limit" | "planner";
-  weekdays: Block[];
-  weekends: Block[];
-  /** Blocks for one day only, in place of the usual set. */
-  today: { day: string; blocks: Block[] } | null;
-  /** Outside the blocks, in planner mode: cover the screen, or leave it alone. */
+  /** Soonest first, no date twice. */
+  dates: DatedBlocks[];
+  /** Outside the blocks, on a block date: cover the screen, or leave it alone. */
   outside: "pause" | "none";
   /** "all": the plan's own shutdown on every Mac. "each": a Mac follows its entry in `each`, or none. */
   scope: "all" | "each";
@@ -44,10 +50,7 @@ export interface ShutdownSchedule {
 }
 
 export const DEFAULT_PLAN: DayPlan = {
-  mode: "limit",
-  weekdays: [],
-  weekends: [],
-  today: null,
+  dates: [],
   outside: "pause",
   shutdown: "off",
   at: null,
@@ -64,6 +67,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 /** More Macs than anyone owns, so a request naming many is refused rather than half done. */
 export const MAX_DEVICES_PER_REQUEST = 50;
 export const MAX_BLOCKS = 8;
+/** More dates than a plan needs ahead; a save with more is refused. */
+export const MAX_DATES = 60;
 const DAY_MINUTES = 24 * 60;
 const MAX_DELAY_MINUTES = 12 * 60;
 const SCRIPT_NAME = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,99}$/;
@@ -95,25 +100,32 @@ function readBlocks(value: unknown): Block[] | null {
   return blocks;
 }
 
+/** The chosen dates: soonest first, no date twice, each with at least one block, at most MAX_DATES. */
+function readDates(value: unknown): DatedBlocks[] | null {
+  if (!Array.isArray(value) || value.length > MAX_DATES) return null;
+  const dates: DatedBlocks[] = [];
+  let previous = "";
+  for (const entry of value) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return null;
+    const { day, blocks: raw } = entry as Record<string, unknown>;
+    if (typeof day !== "string" || !DAY.test(day) || day <= previous) return null;
+    const blocks = readBlocks(raw);
+    if (!blocks || blocks.length === 0) return null;
+    dates.push({ day, blocks });
+    previous = day;
+  }
+  return dates;
+}
+
 /** A whole plan, or "invalid". Nothing malformed is ever stored in part. */
 export function readDayPlan(value: unknown): DayPlan | "invalid" {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return "invalid";
   const record = value as Record<string, unknown>;
-  const mode = record.mode;
-  if (mode !== "limit" && mode !== "planner") return "invalid";
-  const weekdays = readBlocks(record.weekdays ?? []);
-  const weekends = readBlocks(record.weekends ?? []);
-  if (!weekdays || !weekends) return "invalid";
-  let today: DayPlan["today"] = null;
-  if (record.today !== undefined && record.today !== null) {
-    const raw = record.today as Record<string, unknown>;
-    const blocks = readBlocks(raw?.blocks);
-    if (typeof raw !== "object" || typeof raw.day !== "string" || !DAY.test(raw.day) || !blocks) return "invalid";
-    today = { day: raw.day, blocks };
-  }
+  const dates = readDates(record.dates);
+  if (!dates) return "invalid";
   const outside = record.outside ?? "pause";
   if (outside !== "pause" && outside !== "none") return "invalid";
-  const own = readShutdown(record, mode);
+  const own = readShutdown(record);
   if (own === "invalid") return "invalid";
   const scope = record.scope ?? "all";
   if (scope !== "all" && scope !== "each") return "invalid";
@@ -125,27 +137,25 @@ export function readDayPlan(value: unknown): DayPlan | "invalid" {
     if (entries.length > MAX_DEVICES_PER_REQUEST) return "invalid";
     for (const [deviceId, value] of entries) {
       if (!UUID.test(deviceId) || value === null || typeof value !== "object" || Array.isArray(value)) return "invalid";
-      const entry = readShutdown(value as Record<string, unknown>, mode);
+      const entry = readShutdown(value as Record<string, unknown>);
       if (entry === "invalid") return "invalid";
       if (entry.shutdown !== "off") each[deviceId] = entry;
     }
   }
-  return { mode, weekdays, weekends, today, outside, ...own, scope, each };
+  return { dates, outside, ...own, scope, each };
 }
 
 /** A shutdown's four fields, or "invalid". Only what the way of shutting down uses is kept. */
-function readShutdown(record: Record<string, unknown>, mode: DayPlan["mode"]): MacShutdown | "invalid" {
+function readShutdown(record: Record<string, unknown>): MacShutdown | "invalid" {
   const shutdown = record.shutdown ?? "off";
-  if (shutdown !== "off" && shutdown !== "time" && shutdown !== "limit" && shutdown !== "last_block") return "invalid";
-  // Each way of shutting down belongs to one mode, or to both.
-  if ((shutdown === "limit" && mode !== "limit") || (shutdown === "last_block" && mode !== "planner")) return "invalid";
+  if (shutdown !== "off" && shutdown !== "time" && shutdown !== "plan_end") return "invalid";
   let at: number | null = null;
   if (shutdown === "time") {
     if (!isMinute(record.at, DAY_MINUTES - 1)) return "invalid";
     at = record.at;
   }
   let delay = 0;
-  if (shutdown === "limit") {
+  if (shutdown === "plan_end") {
     delay = (record.delay_minutes ?? 0) as number;
     if (!isMinute(delay, MAX_DELAY_MINUTES)) return "invalid";
   }
@@ -163,10 +173,25 @@ export function shutdownFor(plan: DayPlan, deviceId: string | undefined): MacShu
   return (deviceId !== undefined && plan.each[deviceId]) || OFF;
 }
 
-/** The blocks that hold on `day`: today's own, or the usual set for a weekday or a weekend. */
-export function blocksFor(plan: DayPlan, day: string, weekend: boolean): Block[] {
-  if (plan.today?.day === day) return plan.today.blocks;
-  return weekend ? plan.weekends : plan.weekdays;
+/** The blocks of `day` when it is a block date, else none: that day follows the daily limit. */
+export function blocksOn(plan: DayPlan, day: string): Block[] {
+  return plan.dates.find((entry) => entry.day === day)?.blocks ?? [];
+}
+
+/** The day before a "YYYY-MM-DD" day. */
+function dayBefore(day: string): string {
+  const date = new Date(`${day}T12:00:00Z`);
+  date.setUTCDate(date.getUTCDate() - 1);
+  return date.toISOString().slice(0, 10);
+}
+
+/**
+ * The plan without dates before yesterday, so the list does not grow forever. Yesterday stays, as
+ * each Mac follows its own clock.
+ */
+export function withoutPastDates(plan: DayPlan, today: string): DayPlan {
+  const from = dayBefore(today);
+  return { ...plan, dates: plan.dates.filter((entry) => entry.day >= from) };
 }
 
 function clock(minute: number): string {
@@ -177,20 +202,47 @@ function clock(minute: number): string {
  * The shutdown in the shape Macs before the plan understand, for `day` and `deviceId`. The last block
  * ending at midnight shuts down at 23:59, the latest clock time they read. None when nothing is due that day.
  */
-export function legacyShutdown(plan: DayPlan, day: string, weekend: boolean, deviceId?: string): ShutdownSchedule | null {
+export function legacyShutdown(plan: DayPlan, day: string, deviceId?: string): ShutdownSchedule | null {
   const own = shutdownFor(plan, deviceId);
   const command = own.command;
   switch (own.shutdown) {
     case "time":
       return { when: "time", after: clock(own.at ?? 0), delay_minutes: 0, command };
-    case "limit":
-      return { when: "limit", after: null, delay_minutes: own.delay_minutes, command };
-    case "last_block": {
-      const blocks = blocksFor(plan, day, weekend);
-      if (blocks.length === 0) return null;
+    case "plan_end": {
+      const blocks = blocksOn(plan, day);
+      if (blocks.length === 0) return { when: "limit", after: null, delay_minutes: own.delay_minutes, command };
       return { when: "time", after: clock(Math.min(blocks[blocks.length - 1][1], DAY_MINUTES - 1)), delay_minutes: 0, command };
     }
     default:
       return null;
   }
+}
+
+/**
+ * The one-time step for plans stored before dates, as a save would write them in the new shape. The
+ * weekday and weekend blocks are dropped; today's own blocks become a date when that day is `today` or
+ * later; the shutdown after the limit and the one after the last block both become "plan_end". A plan
+ * already in the new shape comes back as it is.
+ */
+export function migrateDayPlan(stored: unknown, today: string): DayPlan | "invalid" {
+  if (stored === null || typeof stored !== "object" || Array.isArray(stored)) return "invalid";
+  const record = stored as Record<string, unknown>;
+  if (!("mode" in record) && Array.isArray(record.dates)) return readDayPlan(record);
+  const shutdownOf = (entry: Record<string, unknown>) => ({
+    ...entry,
+    shutdown: entry.shutdown === "limit" || entry.shutdown === "last_block" ? "plan_end" : entry.shutdown,
+  });
+  const dates: DatedBlocks[] = [];
+  const own = record.today as Record<string, unknown> | null | undefined;
+  if (own && typeof own === "object" && typeof own.day === "string" && own.day >= today && Array.isArray(own.blocks) && own.blocks.length > 0) {
+    dates.push({ day: own.day, blocks: own.blocks as Block[] });
+  }
+  const each: Record<string, unknown> = {};
+  if (record.each && typeof record.each === "object" && !Array.isArray(record.each)) {
+    for (const [deviceId, entry] of Object.entries(record.each as Record<string, unknown>)) {
+      each[deviceId] = entry && typeof entry === "object" ? shutdownOf(entry as Record<string, unknown>) : entry;
+    }
+  }
+  const { mode: _mode, weekdays: _weekdays, weekends: _weekends, today: _today, ...rest } = record;
+  return readDayPlan({ ...shutdownOf(rest), dates, each });
 }

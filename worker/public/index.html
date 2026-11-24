@@ -97,13 +97,6 @@
       <form id="plan-form" class="settings-section" novalidate>
         <h2>Your day</h2>
         <div class="group">
-          <div class="cell">
-            <span class="cell-label">Plan the day by</span>
-            <div class="seg" role="radiogroup" aria-label="Plan the day by">
-              <label><input type="radio" name="plan-mode" value="limit" id="plan-mode-limit"><span>Daily limit</span></label>
-              <label><input type="radio" name="plan-mode" value="planner" id="plan-mode-planner"><span>Time blocks</span></label>
-            </div>
-          </div>
           <div id="plan-limit" class="cell">
             <span class="cell-label">Daily limit <button type="button" class="info" popovertarget="info-limit" aria-label="About the daily limit"></button></span>
             <div id="info-limit" class="info-pop" popover>Counted across all your Macs together.</div>
@@ -112,34 +105,22 @@
               <input id="limit-minutes" class="num-field" type="number" min="0" max="59" step="5" inputmode="numeric" aria-label="Minutes"> min
             </span>
           </div>
-          <div id="plan-planner" hidden>
-            <div class="cell stacked">
-              <span class="cell-label">Weekdays</span>
-              <ol id="blocks-weekdays" class="blocks"></ol>
-              <button type="button" class="add" data-add="weekdays">Add block</button>
-            </div>
-            <div class="cell stacked">
-              <span class="cell-label">Weekends</span>
-              <ol id="blocks-weekends" class="blocks"></ol>
-              <button type="button" class="add" data-add="weekends">Add block</button>
-            </div>
-            <div class="cell stacked">
-              <div class="cell-row">
-                <span class="cell-label">Today</span>
-                <button type="button" class="btn" id="today-change">Change for Today…</button>
-                <button type="button" class="btn" id="today-reset" hidden>Use Usual Blocks</button>
-              </div>
-              <ol id="blocks-today" class="blocks" hidden></ol>
-              <button type="button" class="add" data-add="today" id="today-add" hidden>Add block</button>
-            </div>
-            <div class="cell">
-              <span class="cell-label">Outside the blocks <button type="button" class="info" popovertarget="info-outside" aria-label="About outside the blocks"></button></span>
-              <div id="info-outside" class="info-pop" popover>The cover offers 15 more minutes, or unlocks until the next block with the Mac’s password or Touch ID.</div>
-              <select id="plan-outside" aria-label="Outside the blocks">
-                <option value="pause">Cover the screen</option>
-                <option value="none">Do nothing</option>
-              </select>
-            </div>
+          <p class="cell note">Days without blocks follow the daily limit.</p>
+        </div>
+
+        <h3>Time blocks</h3>
+        <div class="group">
+          <div id="plan-dates"></div>
+          <div class="cell">
+            <button type="button" class="add" id="date-add">Add date</button>
+          </div>
+          <div class="cell">
+            <span class="cell-label">Outside the blocks <button type="button" class="info" popovertarget="info-outside" aria-label="About outside the blocks"></button></span>
+            <div id="info-outside" class="info-pop" popover>The cover offers 15 more minutes, or unlocks until the next block with the Mac’s password or Touch ID.</div>
+            <select id="plan-outside" aria-label="Outside the blocks">
+              <option value="pause">Cover the screen</option>
+              <option value="none">Do nothing</option>
+            </select>
           </div>
         </div>
 
@@ -148,7 +129,7 @@
           <div class="group">
             <div class="cell">
               <span class="cell-label"><label for="overtime-enabled">Remind me to wind down</label> <button type="button" class="info" popovertarget="info-overtime" aria-label="About the reminder past the limit"></button></span>
-              <div id="info-overtime" class="info-pop" popover>A pause with your message as you cross the limit, then again after every few minutes of looking. It takes over from the step-away reminder, and holds with breaks off. To shut down instead, or as well, set Shut down Macs to After the daily limit.</div>
+              <div id="info-overtime" class="info-pop" popover>A pause with your message as you cross the limit, then again after every few minutes of looking. It takes over from the step-away reminder, and holds with breaks off. To shut down instead, or as well, set Shut down Macs to After the last block or the daily limit.</div>
               <input type="checkbox" class="switch" role="switch" id="overtime-enabled">
             </div>
             <div id="plan-over-detail">

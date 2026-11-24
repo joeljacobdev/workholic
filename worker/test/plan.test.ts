@@ -1,53 +1,63 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import * as planModule from "../src/plan.ts";
-import { DEFAULT_PLAN, MAX_BLOCKS, MAX_DEVICES_PER_REQUEST, blocksFor, legacyShutdown, readDayPlan, readDeviceIds, shutdownFor } from "../src/plan.ts";
+import { DEFAULT_PLAN, MAX_BLOCKS, MAX_DATES, MAX_DEVICES_PER_REQUEST, blocksOn, legacyShutdown, readDayPlan, readDeviceIds, shutdownFor, withoutPastDates } from "../src/plan.ts";
 
 const planner = {
-  mode: "planner",
-  weekdays: [[540, 720], [780, 1080]],
-  weekends: [[600, 660]],
-  today: null,
+  dates: [{ day: "2026-10-27", blocks: [[540, 720], [780, 1080]] }, { day: "2026-10-31", blocks: [[600, 660]] }],
   outside: "pause",
-  shutdown: "last_block",
+  shutdown: "plan_end",
   command: null,
 };
 
-test("a limit plan with nothing else", () => {
-  assert.deepEqual(readDayPlan({ mode: "limit" }), { ...DEFAULT_PLAN, scope: "all" });
+test("a plan with no dates and nothing else", () => {
+  assert.deepEqual(readDayPlan({ dates: [] }), { ...DEFAULT_PLAN, scope: "all" });
+  assert.equal(readDayPlan({}), "invalid", "the dates are always sent");
 });
 
-test("a planner with weekday and weekend blocks", () => {
+test("a plan with blocks on two dates", () => {
   assert.deepEqual(readDayPlan(planner), { ...planner, at: null, delay_minutes: 0, scope: "all", each: {} });
 });
 
-test("a shutdown at a set time, in either mode, with a script", () => {
-  for (const mode of ["limit", "planner"]) {
-    const plan = readDayPlan({ mode, shutdown: "time", at: 1320, command: "last-call.sh" });
+test("a shutdown at a set time, with a script", () => {
+  for (const dates of [[], planner.dates]) {
+    const plan = readDayPlan({ dates, shutdown: "time", at: 1320, command: "last-call.sh" });
     assert.notEqual(plan, "invalid");
     assert.equal((plan as { at: number }).at, 1320);
     assert.equal((plan as { command: string }).command, "last-call.sh");
   }
-  assert.equal(readDayPlan({ mode: "limit", shutdown: "time", at: 1440 }), "invalid", "the last minute is 23:59");
-  assert.equal(readDayPlan({ mode: "limit", shutdown: "time" }), "invalid");
+  assert.equal(readDayPlan({ dates: [], shutdown: "time", at: 1440 }), "invalid", "the last minute is 23:59");
+  assert.equal(readDayPlan({ dates: [], shutdown: "time" }), "invalid");
 });
 
-test("each way of shutting down belongs to its mode", () => {
-  assert.equal(readDayPlan({ mode: "planner", shutdown: "limit" }), "invalid");
-  assert.equal(readDayPlan({ mode: "limit", shutdown: "last_block" }), "invalid");
-  assert.equal((readDayPlan({ mode: "limit", shutdown: "limit", delay_minutes: 30 }) as { delay_minutes: number }).delay_minutes, 30);
+test("the wait after the limit is up to twelve hours", () => {
+  assert.equal((readDayPlan({ dates: [], shutdown: "plan_end", delay_minutes: 30 }) as { delay_minutes: number }).delay_minutes, 30);
   for (const delay_minutes of [-1, 1.5, 721, "30"]) {
-    assert.equal(readDayPlan({ mode: "limit", shutdown: "limit", delay_minutes }), "invalid", String(delay_minutes));
+    assert.equal(readDayPlan({ dates: [], shutdown: "plan_end", delay_minutes }), "invalid", String(delay_minutes));
   }
 });
 
 test("only what the shutdown uses is kept", () => {
-  const plan = readDayPlan({ mode: "limit", shutdown: "off", at: 600, delay_minutes: 5, command: "x" });
+  const plan = readDayPlan({ dates: [], shutdown: "off", at: 600, delay_minutes: 5, command: "x" });
   assert.deepEqual(plan, { ...DEFAULT_PLAN, scope: "all" });
 });
 
+test("at most MAX_DATES dates", () => {
+  const day = (index: number) => new Date(Date.UTC(2026, 11, 1) + index * 86_400_000).toISOString().slice(0, 10);
+  const dates = (count: number) => Array.from({ length: count }, (_, index) => ({ day: day(index), blocks: [[540, 600]] }));
+  assert.notEqual(readDayPlan({ dates: dates(MAX_DATES) }), "invalid");
+  assert.equal(readDayPlan({ dates: dates(MAX_DATES + 1) }), "invalid");
+});
+
+test("dates before yesterday are dropped on a save", () => {
+  const plan = readDayPlan({ dates: [{ day: "2026-11-22", blocks: [[540, 600]] }, { day: "2026-11-23", blocks: [[540, 600]] }, { day: "2026-12-01", blocks: [[540, 600]] }] });
+  if (plan === "invalid") return assert.fail();
+  assert.deepEqual(withoutPastDates(plan, "2026-11-24").dates.map((entry) => entry.day), ["2026-11-23", "2026-12-01"]);
+  assert.deepEqual(withoutPastDates(plan, "2026-12-01").dates.map((entry) => entry.day), ["2026-12-01"], "across a month");
+});
+
 test("blocks are in order, apart, and inside the day", () => {
-  for (const weekdays of [
+  for (const blocks of [
     [[720, 540]],
     [[540, 540]],
     [[540, 720], [700, 800]],
@@ -59,50 +69,41 @@ test("blocks are in order, apart, and inside the day", () => {
     "09:00-12:00",
     Array.from({ length: MAX_BLOCKS + 1 }, (_, index) => [index * 60, index * 60 + 30]),
   ]) {
-    assert.equal(readDayPlan({ mode: "planner", weekdays }), "invalid", JSON.stringify(weekdays));
+    assert.equal(readDayPlan({ dates: [{ day: "2026-10-27", blocks }] }), "invalid", JSON.stringify(blocks));
   }
-  assert.notEqual(readDayPlan({ mode: "planner", weekdays: [[0, 720], [720, 1440]] }), "invalid", "touching blocks and a whole day are fine");
-});
-
-test("today's own blocks name their day", () => {
-  const today = { day: "2026-10-26", blocks: [[600, 900]] };
-  assert.deepEqual((readDayPlan({ ...planner, today }) as { today: unknown }).today, today);
-  assert.equal(readDayPlan({ ...planner, today: { day: "today", blocks: [] } }), "invalid");
-  assert.equal(readDayPlan({ ...planner, today: { day: "2026-10-26" } }), "invalid");
-  assert.equal(readDayPlan({ ...planner, today: "2026-10-26" }), "invalid");
+  assert.notEqual(readDayPlan({ dates: [{ day: "2026-10-27", blocks: [[0, 720], [720, 1440]] }] }), "invalid", "touching blocks and a whole day are fine");
 });
 
 test("the command is a bare script name, never a path or shell", () => {
   for (const command of ["../x", "a/b", "/bin/sh", ".hidden", "a..b", "rm -rf", "$(id)", 7]) {
-    assert.equal(readDayPlan({ mode: "limit", shutdown: "time", at: 600, command }), "invalid", String(command));
+    assert.equal(readDayPlan({ dates: [], shutdown: "time", at: 600, command }), "invalid", String(command));
   }
 });
 
 test("other shapes are refused", () => {
-  for (const value of [null, [], "limit", { mode: "tasks" }, { mode: "planner", outside: "lock" }, { mode: "limit", shutdown: "now" }]) {
+  for (const value of [null, [], "limit", { dates: "2026-10-27" }, { dates: [], outside: "lock" }, { dates: [], shutdown: "now" }]) {
     assert.equal(readDayPlan(value), "invalid", JSON.stringify(value));
   }
 });
 
-test("the blocks for a day: today's own, else weekday or weekend", () => {
-  const plan = readDayPlan({ ...planner, today: { day: "2026-10-26", blocks: [[600, 900]] } });
+test("the blocks for a day: the date's own, else none", () => {
+  const plan = readDayPlan(planner);
   assert.notEqual(plan, "invalid");
   if (plan === "invalid") return;
-  assert.deepEqual(blocksFor(plan, "2026-10-26", false), [[600, 900]]);
-  assert.deepEqual(blocksFor(plan, "2026-10-27", false), planner.weekdays);
-  assert.deepEqual(blocksFor(plan, "2026-10-31", true), planner.weekends);
+  assert.deepEqual(blocksOn(plan, "2026-10-27"), planner.dates[0].blocks);
+  assert.deepEqual(blocksOn(plan, "2026-10-31"), planner.dates[1].blocks);
+  assert.deepEqual(blocksOn(plan, "2026-10-28"), []);
 });
 
 test("older Macs get the shutdown as a clock time or a limit", () => {
   const plan = readDayPlan(planner);
   if (plan === "invalid") return assert.fail();
-  assert.deepEqual(legacyShutdown(plan, "2026-10-27", false), { when: "time", after: "18:00", delay_minutes: 0, command: null });
-  assert.deepEqual(legacyShutdown(plan, "2026-10-31", true), { when: "time", after: "11:00", delay_minutes: 0, command: null });
-  assert.equal(legacyShutdown({ ...plan, weekends: [] }, "2026-10-31", true), null, "no blocks that day, no shutdown");
-  assert.deepEqual(legacyShutdown({ ...plan, weekdays: [[1200, 1440]] }, "2026-10-27", false)?.after, "23:59");
-  assert.deepEqual(legacyShutdown({ ...DEFAULT_PLAN, scope: "all", shutdown: "time", at: 1290, command: "cal" }, "2026-10-27", false), { when: "time", after: "21:30", delay_minutes: 0, command: "cal" });
-  assert.deepEqual(legacyShutdown({ ...DEFAULT_PLAN, scope: "all", shutdown: "limit", delay_minutes: 30 }, "2026-10-27", false), { when: "limit", after: null, delay_minutes: 30, command: null });
-  assert.equal(legacyShutdown(DEFAULT_PLAN, "2026-10-27", false), null);
+  assert.deepEqual(legacyShutdown(plan, "2026-10-27"), { when: "time", after: "18:00", delay_minutes: 0, command: null });
+  assert.deepEqual(legacyShutdown(plan, "2026-10-31"), { when: "time", after: "11:00", delay_minutes: 0, command: null });
+  assert.deepEqual(legacyShutdown(plan, "2026-10-28"), { when: "limit", after: null, delay_minutes: 0, command: null }, "no blocks that day, after the limit");
+  assert.deepEqual(legacyShutdown({ ...DEFAULT_PLAN, scope: "all", shutdown: "time", at: 1290, command: "cal" }, "2026-10-27"), { when: "time", after: "21:30", delay_minutes: 0, command: "cal" });
+  assert.deepEqual(legacyShutdown({ ...DEFAULT_PLAN, scope: "all", shutdown: "plan_end", delay_minutes: 30 }, "2026-10-27"), { when: "limit", after: null, delay_minutes: 30, command: null });
+  assert.equal(legacyShutdown(DEFAULT_PLAN, "2026-10-27"), null);
 });
 
 const macA = "8b6c1c0e-3a1a-4e0a-9f1a-0c2b7a6d5e11";
@@ -126,36 +127,36 @@ test("more Macs than anyone owns is refused", () => {
 });
 
 test("each Mac can have its own shutdown; plans before this read as the same on every Mac", () => {
-  const plan = readDayPlan({ mode: "limit" });
+  const plan = readDayPlan({ dates: [] });
   assert.notEqual(plan, "invalid");
   if (plan === "invalid") return;
   assert.equal(plan.scope, "all");
   assert.deepEqual(plan.each, {});
   assert.equal(DEFAULT_PLAN.scope, "each", "a new account starts on each its own way");
   const own = readDayPlan({
-    mode: "limit", scope: "each", shutdown: "off",
-    each: { [macA]: { shutdown: "time", at: 1290, command: "cal" }, [macB]: { shutdown: "limit", delay_minutes: 30 } },
+    dates: [], scope: "each", shutdown: "off",
+    each: { [macA]: { shutdown: "time", at: 1290, command: "cal" }, [macB]: { shutdown: "plan_end", delay_minutes: 30 } },
   });
   if (own === "invalid") return assert.fail("a valid plan with entries per Mac");
   assert.deepEqual(own.each, {
     [macA]: { shutdown: "time", at: 1290, delay_minutes: 0, command: "cal" },
-    [macB]: { shutdown: "limit", at: null, delay_minutes: 30, command: null },
+    [macB]: { shutdown: "plan_end", at: null, delay_minutes: 30, command: null },
   });
   assert.deepEqual(shutdownFor(own, macA), own.each[macA]);
   assert.deepEqual(shutdownFor(own, "00000000-0000-4000-8000-000000000000"), { shutdown: "off", at: null, delay_minutes: 0, command: null }, "a Mac not listed does not shut down");
-  assert.deepEqual(legacyShutdown(own, "2026-10-27", false, macA), { when: "time", after: "21:30", delay_minutes: 0, command: "cal" });
-  assert.deepEqual(legacyShutdown(own, "2026-10-27", false, macB), { when: "limit", after: null, delay_minutes: 30, command: null });
-  assert.equal(legacyShutdown(own, "2026-10-27", false, "00000000-0000-4000-8000-000000000000"), null);
-  assert.equal(legacyShutdown(own, "2026-10-27", false), null, "no Mac named, no shutdown under each");
+  assert.deepEqual(legacyShutdown(own, "2026-10-27", macA), { when: "time", after: "21:30", delay_minutes: 0, command: "cal" });
+  assert.deepEqual(legacyShutdown(own, "2026-10-27", macB), { when: "limit", after: null, delay_minutes: 30, command: null });
+  assert.equal(legacyShutdown(own, "2026-10-27", "00000000-0000-4000-8000-000000000000"), null);
+  assert.equal(legacyShutdown(own, "2026-10-27"), null, "no Mac named, no shutdown under each");
 });
 
 test("under one schedule for every Mac the entries are dropped, and off entries are never kept", () => {
-  const shared = readDayPlan({ mode: "limit", scope: "all", shutdown: "time", at: 600, each: { [macA]: { shutdown: "time", at: 1290 } } });
+  const shared = readDayPlan({ dates: [], scope: "all", shutdown: "time", at: 600, each: { [macA]: { shutdown: "time", at: 1290 } } });
   if (shared === "invalid") return assert.fail();
   assert.deepEqual(shared.each, {});
   assert.deepEqual(shutdownFor(shared, macA), { shutdown: "time", at: 600, delay_minutes: 0, command: null });
-  assert.deepEqual(legacyShutdown(shared, "2026-10-27", false, macB)?.after, "10:00");
-  const sparse = readDayPlan({ mode: "limit", scope: "each", each: { [macA]: { shutdown: "off", at: 600 }, [macB]: { shutdown: "time", at: 60 } } });
+  assert.deepEqual(legacyShutdown(shared, "2026-10-27", macB)?.after, "10:00");
+  const sparse = readDayPlan({ dates: [], scope: "each", each: { [macA]: { shutdown: "off", at: 600 }, [macB]: { shutdown: "time", at: 60 } } });
   if (sparse === "invalid") return assert.fail();
   assert.deepEqual(Object.keys(sparse.each), [macB]);
 });
@@ -163,9 +164,10 @@ test("under one schedule for every Mac the entries are dropped, and off entries 
 test("entries per Mac follow the plan's own rules", () => {
   for (const each of [
     { [macA]: { shutdown: "last_block" } },
+    { [macA]: { shutdown: "limit" } },
     { [macA]: { shutdown: "time" } },
     { [macA]: { shutdown: "time", at: 1440 } },
-    { [macA]: { shutdown: "limit", delay_minutes: 721 } },
+    { [macA]: { shutdown: "plan_end", delay_minutes: 721 } },
     { [macA]: { shutdown: "time", at: 600, command: "../x" } },
     { [macA]: { shutdown: "now" } },
     { [macA]: "time" },
@@ -173,10 +175,10 @@ test("entries per Mac follow the plan's own rules", () => {
     [{ shutdown: "time", at: 600 }],
     Object.fromEntries(Array.from({ length: MAX_DEVICES_PER_REQUEST + 1 }, (_, index) => [`00000000-0000-4000-8000-${String(index).padStart(12, "0")}`, { shutdown: "time", at: 600 }])),
   ]) {
-    assert.equal(readDayPlan({ mode: "limit", scope: "each", each }), "invalid", JSON.stringify(each));
+    assert.equal(readDayPlan({ dates: [], scope: "each", each }), "invalid", JSON.stringify(each));
   }
-  assert.equal(readDayPlan({ mode: "limit", scope: "some" }), "invalid");
-  assert.notEqual(readDayPlan({ mode: "planner", scope: "each", each: { [macA]: { shutdown: "last_block" } } }), "invalid");
+  assert.equal(readDayPlan({ dates: [], scope: "some" }), "invalid");
+  assert.notEqual(readDayPlan({ dates: [], scope: "each", each: { [macA]: { shutdown: "plan_end" } } }), "invalid");
 });
 
 // Blocks on chosen dates; every other day follows the daily limit. The new functions are reached

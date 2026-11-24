@@ -325,11 +325,11 @@ try {
   assert.equal(shown.shutdown_schedule, undefined, "Macs no longer have schedules of their own");
   const fresh = await request(commandsPath, { token: device });
   assert.equal(fresh.body.day_plan_updated_at_ms, 0, "no plan saved yet");
-  assert.equal(fresh.body.day_plan.mode, "limit", "the default is a limit and nothing else");
+  assert.deepEqual(fresh.body.day_plan.dates, [], "the default has no dates, so every day follows the limit");
   assert.equal(fresh.body.shutdown_schedule, null);
   assert.equal((await request(`${commandsPath}?plan_at=0`, { token: device })).body.day_plan, undefined, "a Mac with the latest plan is not sent it again");
 
-  const nightly = { mode: "limit", shutdown: "time", at: 1380, command: "last-call-end" };
+  const nightly = { dates: [], shutdown: "time", at: 1380, command: "last-call-end" };
   assert.equal((await request("/v1/day-plan", { method: "PUT", token: device, body: { plan: nightly } })).status, 401, "a device token cannot set the plan");
   assert.equal((await request("/v1/day-plan", { method: "PUT", token: web, body: { plan: { ...nightly, command: "../x" } } })).status, 422);
   assert.equal((await request("/v1/day-plan", { method: "PUT", token: web, body: { plan: nightly, limit_ms: -5 } })).status, 422);
@@ -360,10 +360,21 @@ try {
   assert.deepEqual(breaksAfter.overtime, windDown, "a Mac reads it with the breaks");
   assert.ok(breaksAfter.updated_at_ms > breaksBefore, "and sees the breaks changed");
   assert.deepEqual((await request("/v1/settings", { token: web })).body.overtime, windDown);
-  const sameLimit = await request("/v1/day-plan", { method: "PUT", token: web, body: { plan: { mode: "planner", weekdays: [[540, 1080]], weekends: [[540, 1080]], shutdown: "last_block" }, limit_ms: 5 * 3_600_000 } });
-  assert.equal(sameLimit.body.day_plan.mode, "planner");
+  // Blocks on chosen dates: today's blocks end the day; a day without blocks follows the limit.
+  const dayIn = (timeZone, ms) => new Intl.DateTimeFormat("en-CA", { timeZone }).format(new Date(ms));
+  const todayHere = dayIn(viaSettings.timezone, Date.now());
+  const longAgo = dayIn(viaSettings.timezone, Date.now() - 5 * 86_400_000);
+  const dated = { dates: [{ day: longAgo, blocks: [[600, 660]] }, { day: todayHere, blocks: [[540, 1080]] }], shutdown: "plan_end", delay_minutes: 20 };
+  const sameLimit = await request("/v1/day-plan", { method: "PUT", token: web, body: { plan: dated, limit_ms: 5 * 3_600_000 } });
+  assert.equal(sameLimit.status, 200);
+  assert.deepEqual(sameLimit.body.day_plan.dates, [{ day: todayHere, blocks: [[540, 1080]] }], "dates before yesterday are dropped on a save");
   assert.equal((await request(commandsPath, { token: device })).body.shutdown_schedule.after, "18:00", "after the last block, as a clock time for older Macs");
-  await request("/v1/day-plan", { method: "PUT", token: web, body: { plan: { mode: "limit" } } });
+  await request("/v1/day-plan", { method: "PUT", token: web, body: { plan: { ...dated, dates: [] } } });
+  assert.deepEqual((await request(commandsPath, { token: device })).body.shutdown_schedule, { when: "limit", after: null, delay_minutes: 20, command: null }, "no blocks today, after the limit");
+  const tooMany = Array.from({ length: 61 }, (_, index) => ({ day: dayIn("UTC", Date.UTC(2030, 0, 1) + index * 86_400_000), blocks: [[540, 600]] }));
+  assert.equal((await request("/v1/day-plan", { method: "PUT", token: web, body: { plan: { dates: tooMany } } })).body.error, "too_many_dates");
+  assert.equal((await request("/v1/day-plan", { method: "PUT", token: web, body: { plan: { mode: "limit" } } })).status, 422, "the old shape is no longer read");
+  await request("/v1/day-plan", { method: "PUT", token: web, body: { plan: { dates: [] } } });
   assert.equal((await request(commandsPath, { token: device })).body.shutdown_schedule, null, "turned off");
 
   // Several Macs at once: one shutdown for every Mac named, or for none.

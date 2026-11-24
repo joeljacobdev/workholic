@@ -374,10 +374,10 @@ export async function loadToday() {
   const today = dayKeyIn(app.settings.timezone);
   const detail = await api(`/v1/days/${today}`);
   const used = detail.credited_ms;
-  // With time blocks, today is measured against what its blocks add up to, not the daily limit.
-  const plan = currentPlan();
-  const planner = plan.mode === "planner";
-  const limit = planner ? plannedMs(blocksOn(plan, today)) : detail.ceiling_ms;
+  // On a block date, today is measured against what its blocks add up to; any other day, the daily limit.
+  const blocks = blocksOn(currentPlan(), today);
+  const planner = blocks.length > 0;
+  const limit = planner ? plannedMs(blocks) : detail.ceiling_ms;
   const over = limit !== null && used > limit;
 
   $("today-used").textContent = formatDuration(used);

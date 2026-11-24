@@ -169,17 +169,18 @@ final class AppModel {
     }
 
     /// Today's looking, across every device: the account's last merge, or this Mac if it is ahead.
-    /// It counts against the daily limit, or with the planner, the time today's blocks add up to.
+    /// It counts against the daily limit, or on a block date, the time today's blocks add up to.
     func todayUsage(now: Date = Date()) -> (usedMs: Int64, ceilingMs: Int64?) {
         let range = dayRange(now)
         let local = store.attendedMs(dayStart: range.start, dayEnd: range.end)
-        let ceiling = accountPlan.mode == .planner ? Int64(plannedMinutes(todayBlocks(now))) * 60_000 : ceilingMs
+        let blocks = todayBlocks(now)
+        let ceiling = limitApplies(blocks) ? ceilingMs : Int64(plannedMinutes(blocks)) * 60_000
         return (max(syncedCreditedMs ?? 0, local), ceiling)
     }
 
-    /// The plan's blocks for today on this Mac's calendar.
+    /// The plan's blocks for today on this Mac's calendar; none when today is not a block date.
     private func todayBlocks(_ now: Date) -> [[Int]] {
-        blocksFor(accountPlan, day: civilDay(now), weekend: Calendar.current.isDateInWeekend(now))
+        blocksOn(accountPlan, day: civilDay(now))
     }
 
     private func todayShutdownRule(now: Date) -> ShutdownRule? {
@@ -296,7 +297,7 @@ final class AppModel {
     func menuLines() -> [String] {
         var lines: [String] = []
         let usage = todayUsage()
-        if accountPlan.mode == .planner {
+        if !limitApplies(todayBlocks(Date())) {
             lines.append("Today: \(formatDuration(usage.usedMs)) of \(formatDuration(usage.ceilingMs ?? 0)) planned")
             lines.append(planLine(now: Date()))
         } else if let ceiling = usage.ceilingMs {
@@ -1041,9 +1042,9 @@ final class AppModel {
         return Int64(seconds) * 1_000
     }
 
-    /// The daily limit, which only limit mode has. The planner's blocks are not a limit.
+    /// The daily limit, which holds only on a day without blocks. A block date's blocks are not a limit.
     private func committedMs(now: Date) -> Int64? {
-        accountPlan.mode == .limit ? ceilingMs : nil
+        limitApplies(todayBlocks(now)) ? ceilingMs : nil
     }
 
     func scheduleSync() {

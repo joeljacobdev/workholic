@@ -5,7 +5,7 @@ import { dayKey, dayWindow, daysTouched } from "./day";
 import { restartIfOlder, type CodeVersion } from "./fresh";
 import { creditDay, type DayCredit, type RawInterval } from "./merge";
 import { base64url, sha256Hex } from "./password";
-import { DEFAULT_PLAN, legacyShutdown, readDayPlan, readDeviceIds, type DayPlan, type ShutdownSchedule } from "./plan";
+import { DEFAULT_PLAN, MAX_DATES, legacyShutdown, migrateDayPlan, readDayPlan, readDeviceIds, withoutPastDates, type DayPlan, type ShutdownSchedule } from "./plan";
 import { askShutdowns, latestShutdown, latestShutdowns, refuseTargets, withdrawShutdown, type ShutdownState } from "./shutdown";
 
 export type { ShutdownState };
@@ -263,7 +263,35 @@ export class UserAccount extends DurableObject<Env> {
       if (deviceColumns.some((column) => column.name === "shutdown_schedule_json")) {
         this.ctx.storage.sql.exec("ALTER TABLE device DROP COLUMN shutdown_schedule_json");
       }
+      this.migrateStoredPlan();
     });
+  }
+
+  /**
+   * Once: a plan saved before dates (weekday and weekend blocks, a mode) is written again in the new
+   * shape, as a save would (see `migrateDayPlan`). The old JSON stays in `plan_json_before` as a way
+   * back; nothing reads it. `updated_at_ms` moves on so every Mac fetches the new plan.
+   */
+  private migrateStoredPlan(): void {
+    const sql = this.ctx.storage.sql;
+    const columns = sql.exec<{ name: string }>("PRAGMA table_info(day_plan)").toArray();
+    if (!columns.some((column) => column.name === "plan_json_before")) sql.exec("ALTER TABLE day_plan ADD COLUMN plan_json_before TEXT");
+    const row = sql.exec<{ plan_json: string; updated_at_ms: number }>("SELECT plan_json, updated_at_ms FROM day_plan WHERE id = 1").toArray()[0];
+    if (!row) return;
+    const stored = JSON.parse(row.plan_json) as Record<string, unknown>;
+    if (!("mode" in stored)) return;
+    const timezone = sql.exec<{ timezone: string }>("SELECT timezone FROM user LIMIT 1").toArray()[0]?.timezone ?? "UTC";
+    const now = Date.now();
+    const plan = migrateDayPlan(stored, dayKey(now, timezone));
+    if (plan === "invalid") {
+      console.error("day_plan: the stored plan could not be moved to dates; left as it was");
+      return;
+    }
+    sql.exec(
+      "UPDATE day_plan SET plan_json_before = plan_json, plan_json = ?, updated_at_ms = ? WHERE id = 1",
+      JSON.stringify(plan),
+      Math.max(now, row.updated_at_ms + 1),
+    );
   }
 
   /** Called once by each fresh Worker isolate; restarts this object if it still runs older code. See fresh.ts. */
@@ -429,7 +457,7 @@ export class UserAccount extends DurableObject<Env> {
     };
   }
 
-  /** The account's plan, or the default (a limit, nothing else) until one is saved, with `updatedAtMs` 0. */
+  /** The account's plan, or the default (no dates, so every day follows the limit) until one is saved, with `updatedAtMs` 0. */
   private storedPlan(): { plan: DayPlan; updatedAtMs: number } {
     const row = this.ctx.storage.sql
       .exec<{ plan_json: string; updated_at_ms: number }>("SELECT plan_json, updated_at_ms FROM day_plan WHERE id = 1")
@@ -450,8 +478,11 @@ export class UserAccount extends DurableObject<Env> {
     overtime: OvertimeBreak;
   }>> {
     if (!(await this.sessionFor(input.sessionToken, input.now))) return { error: "bad_token", status: 401 };
-    const plan = readDayPlan(input.plan);
-    if (plan === "invalid") return { error: "bad_plan", status: 422 };
+    const sentDates = (input.plan as { dates?: unknown } | null)?.dates;
+    if (Array.isArray(sentDates) && sentDates.length > MAX_DATES) return { error: "too_many_dates", status: 422 };
+    const read = readDayPlan(input.plan);
+    if (read === "invalid") return { error: "bad_plan", status: 422 };
+    const plan = withoutPastDates(read, dayKey(input.now, this.requireUser().timezone));
     const limitMs = input.limitMs;
     if (limitMs !== undefined && limitMs !== null && (!Number.isInteger(limitMs) || (limitMs as number) < 0 || (limitMs as number) > 24 * 3_600_000)) {
       return { error: "bad_limit", status: 422 };
@@ -579,10 +610,9 @@ export class UserAccount extends DurableObject<Env> {
     const user = this.requireUser();
     const plan = this.storedPlan();
     const today = dayKey(input.now, user.timezone);
-    const weekday = new Date(`${today}T12:00:00Z`).getUTCDay();
     return {
       commands,
-      shutdown_schedule: legacyShutdown(plan.plan, today, weekday === 0 || weekday === 6, device.deviceId),
+      shutdown_schedule: legacyShutdown(plan.plan, today, device.deviceId),
       day_plan_updated_at_ms: plan.updatedAtMs,
       ...(input.planAtMs === plan.updatedAtMs ? {} : { day_plan: plan.plan }),
       settings: {
