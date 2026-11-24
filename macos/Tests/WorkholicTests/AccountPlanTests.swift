@@ -122,4 +122,79 @@ final class AccountPlanTests: XCTestCase {
         XCTAssertEqual(plannedMinutes(workday), 480)
         XCTAssertEqual(plannedMinutes([]), 0)
     }
+
+    // Blocks on chosen dates; every other day follows the daily limit. The plan is read from the
+    // server's shape, which has no mode, weekdays, weekends or today.
+    private let blockDay = "2026-12-01"
+    private let freeDay = "2026-12-02"
+
+    private func datesPlan(outside: String = "pause", shutdown: String = "plan_end", delay: Int = 30) -> AccountPlan? {
+        decode(#"{"dates":[{"day":"2026-12-01","blocks":[[540,720],[780,1080]]}],"outside":"\#(outside)","shutdown":"\#(shutdown)","at":null,"delay_minutes":\#(delay),"command":null,"scope":"all","each":{}}"#)
+    }
+
+    func testPlanWithOnlyDatesIsRead() {
+        XCTAssertNotNil(datesPlan(), "no mode needed")
+        XCTAssertNotNil(decode(#"{"dates":[]}"#), "no dates is a plan")
+        XCTAssertEqual(datesPlan()?.shutdown, .planEnd)
+        if let plan = datesPlan() { XCTAssertTrue(validAccountPlan(plan)) }
+    }
+
+    func testBlocksOnlyOnTheirDate() {
+        guard let plan = datesPlan() else { return XCTFail("a plan with dates decodes") }
+        XCTAssertEqual(blocksOn(plan, day: blockDay), workday)
+        XCTAssertEqual(blocksOn(plan, day: freeDay), [])
+        XCTAssertEqual(blocksOn(plan, day: "2026-11-30"), [])
+    }
+
+    func testABlockDateCoversOutsideItsBlocksAndAFreeDateIsNeverCovered() {
+        guard let plan = datesPlan() else { return XCTFail("a plan with dates decodes") }
+        let onBlockDay = blocksOn(plan, day: blockDay)
+        let onFreeDay = blocksOn(plan, day: freeDay)
+        XCTAssertTrue(plannerCovers(plan, blocks: onBlockDay, day: blockDay, minute: 480), "before the first block")
+        XCTAssertFalse(plannerCovers(plan, blocks: onBlockDay, day: blockDay, minute: 600), "inside a block")
+        XCTAssertTrue(plannerCovers(plan, blocks: onBlockDay, day: blockDay, minute: 1200), "after the last block")
+        XCTAssertFalse(plannerCovers(plan, blocks: onFreeDay, day: freeDay, minute: 600), "a day without blocks is not covered")
+        XCTAssertFalse(plannerCovers(plan, blocks: onFreeDay, day: freeDay, minute: 1200))
+    }
+
+    func testTheLimitAppliesOnlyOnDaysWithoutBlocks() {
+        guard let plan = datesPlan() else { return XCTFail("a plan with dates decodes") }
+        XCTAssertFalse(limitApplies(blocksOn(plan, day: blockDay)), "on a block date only the blocks count")
+        XCTAssertTrue(limitApplies(blocksOn(plan, day: freeDay)))
+        XCTAssertTrue(limitApplies([]))
+    }
+
+    func testLeavingTheGapsAloneStillNeverCoversOnABlockDate() {
+        guard let plan = datesPlan(outside: "none") else { return XCTFail("a plan with dates decodes") }
+        XCTAssertFalse(plannerCovers(plan, blocks: blocksOn(plan, day: blockDay), day: blockDay, minute: 480))
+    }
+
+    func testPlanEndFollowsTheDay() {
+        guard let plan = datesPlan(delay: 30) else { return XCTFail("a plan with dates decodes") }
+        XCTAssertEqual(planShutdownRule(plan, blocks: blocksOn(plan, day: blockDay)), ShutdownRule(when: .time, after: "18:00"),
+                       "on a block date, the last block's end")
+        XCTAssertEqual(planShutdownRule(plan, blocks: blocksOn(plan, day: freeDay)), ShutdownRule(when: .limit, delayMinutes: 30),
+                       "on any other day, after the limit")
+        guard let midnight = decode(#"{"dates":[{"day":"2026-12-01","blocks":[[1200,1440]]}],"shutdown":"plan_end"}"#) else { return XCTFail("decodes") }
+        XCTAssertEqual(planShutdownRule(midnight, blocks: blocksOn(midnight, day: blockDay))?.after, "23:59")
+    }
+
+    func testASetTimeAndOffDoNotDependOnTheDay() {
+        guard let timed = decode(#"{"dates":[{"day":"2026-12-01","blocks":[[540,720]]}],"shutdown":"time","at":1290}"#),
+              let off = datesPlan(shutdown: "off") else { return XCTFail("decodes") }
+        XCTAssertEqual(planShutdownRule(timed, blocks: blocksOn(timed, day: blockDay)), ShutdownRule(when: .time, after: "21:30"))
+        XCTAssertEqual(planShutdownRule(timed, blocks: blocksOn(timed, day: freeDay)), ShutdownRule(when: .time, after: "21:30"))
+        XCTAssertNil(planShutdownRule(off, blocks: blocksOn(off, day: blockDay)))
+    }
+
+    func testDatesAreCheckedAgainOnTheMac() {
+        XCTAssertNil(decode(#"{"dates":[{"day":"2026-12-01","blocks":[[540,720]]}],"shutdown":"limit"}"#), "limit is no longer a choice; plan_end replaces it")
+        XCTAssertNil(decode(#"{"dates":[{"day":"2026-12-01","blocks":[[540,720]]}],"shutdown":"last_block"}"#))
+        if let bad = decode(#"{"dates":[{"day":"2026-12-01","blocks":[[720,540]]}]}"#) {
+            XCTAssertFalse(validAccountPlan(bad), "a backwards block")
+        } else { XCTFail("the shape decodes; the check refuses it") }
+        if let overlap = decode(#"{"dates":[{"day":"2026-12-01","blocks":[[540,720],[700,800]]}]}"#) {
+            XCTAssertFalse(validAccountPlan(overlap), "blocks do not overlap")
+        } else { XCTFail("the shape decodes; the check refuses it") }
+    }
 }

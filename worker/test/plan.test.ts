@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import * as planModule from "../src/plan.ts";
 import { DEFAULT_PLAN, MAX_BLOCKS, MAX_DEVICES_PER_REQUEST, blocksFor, legacyShutdown, readDayPlan, readDeviceIds, shutdownFor } from "../src/plan.ts";
 
 const planner = {
@@ -176,4 +177,152 @@ test("entries per Mac follow the plan's own rules", () => {
   }
   assert.equal(readDayPlan({ mode: "limit", scope: "some" }), "invalid");
   assert.notEqual(readDayPlan({ mode: "planner", scope: "each", each: { [macA]: { shutdown: "last_block" } } }), "invalid");
+});
+
+// Blocks on chosen dates; every other day follows the daily limit. The new functions are reached
+// through the module object so the tests above still load before the build exists.
+const dated = {
+  dates: [{ day: "2026-12-01", blocks: [[540, 720], [780, 1080]] }],
+  outside: "pause",
+  shutdown: "plan_end",
+  delay_minutes: 30,
+  command: null,
+};
+const PLAN_DAY = "2026-12-01";
+const FREE_DAY = "2026-12-02";
+
+test("a plan with only dates, no mode, is valid", () => {
+  const plan = readDayPlan(dated);
+  assert.notEqual(plan, "invalid");
+  assert.deepEqual((plan as { dates: unknown }).dates, dated.dates);
+  assert.equal((plan as { shutdown: string }).shutdown, "plan_end");
+  assert.equal("mode" in (plan as object), false);
+  assert.equal("weekdays" in (plan as object), false);
+  assert.equal("today" in (plan as object), false);
+});
+
+test("a plan with no dates is valid, and the old mode shape is no longer read", () => {
+  assert.notEqual(readDayPlan({ dates: [] }), "invalid");
+  assert.equal(readDayPlan({ dates: [{ day: PLAN_DAY, blocks: [] }] }), "invalid", "a date without blocks is not entered");
+  assert.equal(readDayPlan({ dates: [{ day: "12/01/2026", blocks: [[540, 600]] }] }), "invalid");
+  assert.equal(readDayPlan({ dates: [{ day: PLAN_DAY, blocks: [[600, 540]] }] }), "invalid");
+  assert.equal(readDayPlan({ dates: [{ day: PLAN_DAY, blocks: [[540, 700], [600, 800]] }] }), "invalid", "blocks do not overlap");
+  assert.equal(readDayPlan({ dates: [{ day: PLAN_DAY, blocks: [[540, 600]] }, { day: PLAN_DAY, blocks: [[700, 800]] }] }), "invalid", "no repeated date");
+  assert.equal(readDayPlan({ dates: [{ day: "2026-12-02", blocks: [[540, 600]] }, { day: PLAN_DAY, blocks: [[540, 600]] }] }), "invalid", "dates are in order");
+});
+
+test("plan_end is a choice in the plan and in each Mac's entry", () => {
+  const macA = "8b6c1c0e-3a1a-4e0a-9f1a-0c2b7a6d5e11";
+  const plan = readDayPlan({ ...dated, scope: "each", each: { [macA]: { shutdown: "plan_end", delay_minutes: 15 } } });
+  assert.notEqual(plan, "invalid");
+  assert.equal((plan as { each: Record<string, { shutdown: string; delay_minutes: number }> }).each[macA].shutdown, "plan_end");
+  assert.equal((plan as { each: Record<string, { delay_minutes: number }> }).each[macA].delay_minutes, 15);
+  assert.equal(readDayPlan({ ...dated, delay_minutes: 721 }), "invalid");
+  for (const old of ["limit", "last_block"]) assert.equal(readDayPlan({ ...dated, shutdown: old }), "invalid", old);
+});
+
+test("blocksOn gives the blocks of a block date and nothing on any other day", () => {
+  const plan = readDayPlan(dated);
+  assert.notEqual(plan, "invalid");
+  const { blocksOn } = planModule as unknown as { blocksOn: (plan: unknown, day: string) => number[][] };
+  assert.deepEqual(blocksOn(plan, PLAN_DAY), dated.dates[0].blocks);
+  assert.deepEqual(blocksOn(plan, FREE_DAY), []);
+  assert.deepEqual(blocksOn(plan, "2026-11-30"), []);
+});
+
+test("plan_end follows the day: the last block's end on a block date, the limit plus the wait on other days", () => {
+  const plan = readDayPlan(dated);
+  assert.notEqual(plan, "invalid");
+  const legacy = planModule.legacyShutdown as unknown as (plan: unknown, day: string, deviceId?: string) => unknown;
+  assert.deepEqual(legacy(plan, PLAN_DAY), { when: "time", after: "18:00", delay_minutes: 0, command: null });
+  assert.deepEqual(legacy(plan, FREE_DAY), { when: "limit", after: null, delay_minutes: 30, command: null });
+});
+
+test("plan_end on a block date ending at midnight shuts down at 23:59", () => {
+  const plan = readDayPlan({ ...dated, dates: [{ day: PLAN_DAY, blocks: [[1200, 1440]] }] });
+  const legacy = planModule.legacyShutdown as unknown as (plan: unknown, day: string) => { after: string };
+  assert.equal(legacy(plan, PLAN_DAY).after, "23:59");
+});
+
+test("off and a set time do not depend on the day", () => {
+  const legacy = planModule.legacyShutdown as unknown as (plan: unknown, day: string) => unknown;
+  const timed = readDayPlan({ ...dated, shutdown: "time", at: 1290 });
+  assert.deepEqual(legacy(timed, PLAN_DAY), { when: "time", after: "21:30", delay_minutes: 0, command: null });
+  assert.deepEqual(legacy(timed, FREE_DAY), { when: "time", after: "21:30", delay_minutes: 0, command: null });
+  assert.equal(legacy(readDayPlan({ ...dated, shutdown: "off" }), PLAN_DAY), null);
+});
+
+// The stored-row step: the plan as an account saved it before dates, turned into the new shape.
+// `migrateDayPlan(stored, today)` takes the parsed old JSON and today's "YYYY-MM-DD" and returns the new plan.
+const migrate = (stored: unknown, today = "2026-11-24") =>
+  (planModule as unknown as { migrateDayPlan: (stored: unknown, today: string) => Record<string, unknown> }).migrateDayPlan(stored, today);
+const oldPlanner = {
+  mode: "planner",
+  weekdays: [[540, 720], [780, 1080]],
+  weekends: [[600, 660]],
+  today: null,
+  outside: "none",
+  shutdown: "last_block",
+  at: null,
+  delay_minutes: 0,
+  command: "cal.sh",
+  scope: "all",
+  each: {},
+};
+
+test("a blocks-mode plan loses mode, weekdays and weekends, and last_block becomes plan_end", () => {
+  const out = migrate(oldPlanner);
+  for (const key of ["mode", "weekdays", "weekends", "today"]) assert.equal(key in out, false, key);
+  assert.deepEqual(out.dates, []);
+  assert.equal(out.shutdown, "plan_end");
+  assert.equal(out.command, "cal.sh");
+  assert.equal(out.outside, "none");
+  assert.notEqual(readDayPlan(out), "invalid", "the result is a plan the server reads");
+});
+
+test("limit and last_block both become plan_end, with the wait kept; time and off stay", () => {
+  const macA = "8b6c1c0e-3a1a-4e0a-9f1a-0c2b7a6d5e11";
+  const macB = "1f0e2d3c-4b5a-4968-8776-655443322110";
+  const macC = "00000000-0000-4000-8000-000000000003";
+  const out = migrate({
+    mode: "limit", weekdays: [], weekends: [], today: null, outside: "pause",
+    shutdown: "limit", at: null, delay_minutes: 45, command: null,
+    scope: "each",
+    each: {
+      [macA]: { shutdown: "limit", at: null, delay_minutes: 30, command: null },
+      [macB]: { shutdown: "time", at: 1290, delay_minutes: 0, command: "cal.sh" },
+      [macC]: { shutdown: "last_block", at: null, delay_minutes: 0, command: null },
+    },
+  });
+  assert.equal(out.shutdown, "plan_end");
+  assert.equal(out.delay_minutes, 45);
+  const each = out.each as Record<string, { shutdown: string; delay_minutes: number; at: number | null }>;
+  assert.equal(each[macA].shutdown, "plan_end");
+  assert.equal(each[macA].delay_minutes, 30);
+  assert.equal(each[macB].shutdown, "time");
+  assert.equal(each[macB].at, 1290);
+  assert.equal(each[macC].shutdown, "plan_end");
+  assert.notEqual(readDayPlan(out), "invalid");
+  assert.equal(migrate({ mode: "limit", shutdown: "off" }).shutdown, "off");
+});
+
+test("yesterday's today is dropped; a today for today or later becomes a date entry", () => {
+  const past = migrate({ ...oldPlanner, today: { day: "2026-11-23", blocks: [[600, 900]] } });
+  assert.deepEqual(past.dates, []);
+  assert.equal("today" in past, false);
+
+  const now = migrate({ ...oldPlanner, today: { day: "2026-11-24", blocks: [[600, 900]] } });
+  assert.deepEqual(now.dates, [{ day: "2026-11-24", blocks: [[600, 900]] }]);
+
+  const later = migrate({ ...oldPlanner, today: { day: "2026-11-25", blocks: [[600, 900]] } });
+  assert.deepEqual(later.dates, [{ day: "2026-11-25", blocks: [[600, 900]] }]);
+
+  const empty = migrate({ ...oldPlanner, today: { day: "2026-11-24", blocks: [] } });
+  assert.deepEqual(empty.dates, [], "a date without blocks is not entered");
+  assert.notEqual(readDayPlan(now), "invalid");
+});
+
+test("migrating a plan already in the new shape changes nothing", () => {
+  const plan = readDayPlan(dated);
+  assert.deepEqual(migrate(plan), plan);
 });
